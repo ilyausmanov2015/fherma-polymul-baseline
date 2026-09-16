@@ -1,0 +1,60 @@
+{
+  "kind": "local-independent-oracle",
+  "point": {
+    "N": 32768,
+    "W": 868,
+    "L": 28
+  },
+  "passed": true,
+  "verdicts": [
+    {
+      "case": "dense-random-1",
+      "passed": true,
+      "seconds": 0.745353834
+    },
+    {
+      "case": "dense-random-2",
+      "passed": true,
+      "seconds": 0.747975833
+    },
+    {
+      "case": "zero",
+      "passed": true,
+      "seconds": 0.532121042
+    },
+    {
+      "case": "identity",
+      "passed": true,
+      "seconds": 0.641070667
+    },
+    {
+      "case": "wrap-sign",
+      "passed": true,
+      "seconds": 0.46475025
+    },
+    {
+      "case": "all-q-minus-one",
+      "passed": true,
+      "seconds": 0.755902166
+    },
+    {
+      "case": "alternating",
+      "passed": true,
+      "seconds": 0.718903291
+    },
+    {
+      "case": "limb-boundaries",
+      "passed": true,
+      "seconds": 0.743521833
+    },
+    {
+      "case": "random-after-edges",
+      "passed": true,
+      "seconds": 0.751121958
+    }
+  ],
+  "source_sha256": "69298a39f88c60909f02880c739d6ffe4a84a3a225ececc8d732117ed85b7544",
+  "median_seconds": 0.743521833,
+  "init_seconds": 0.51253,
+  "execution": "Sequential CPU emulation of CUDA kernel bodies using GMP. Not a GPU or cuPQC result."
+}
