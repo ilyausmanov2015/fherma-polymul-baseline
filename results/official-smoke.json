@@ -1,0 +1,100 @@
+{
+  "kind": "official-fherma-smoke",
+  "run_id": "6aaabe9f199a4bc1dcaecc66",
+  "url": "https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aaabe9f199a4bc1dcaecc66",
+  "commit": "d736e66ed00733c232280948b3e7726e231d0243",
+  "status": "finished",
+  "runner": {
+    "id": "6aa6690fd4413d278e91947e",
+    "name": "fherma-gpu-rtx6000",
+    "reference": false,
+    "machine": {
+      "arch": "x86_64",
+      "cores": 24,
+      "memory_gb": 214,
+      "memory_cap_gb": 200,
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition \u00b7 97887 MiB",
+      "gpu_memory_gb": 95.6,
+      "cpu": "Intel(R) Xeon(R) 6776P",
+      "kernel": "6.11.0-1016-nvidia",
+      "os": "linux"
+    }
+  },
+  "cases": 2,
+  "passed": 2,
+  "points": [
+    {
+      "point": "N32768-W868",
+      "seeds": 2,
+      "passed": 2,
+      "lost": 0,
+      "seconds": {
+        "min": 0.002523491,
+        "median": 0.002547658,
+        "mean": 0.002547658,
+        "max": 0.002571825
+      },
+      "memory_mb": {
+        "min": 77,
+        "median": 77,
+        "max": 77
+      },
+      "metrics": {
+        "gpu_mem_mb": {
+          "min": 559,
+          "max": 559
+        },
+        "gpu_power_w": {
+          "min": 68.1,
+          "max": 68.1
+        },
+        "gpu_util_pct": {
+          "min": 1,
+          "max": 1
+        },
+        "gpu_mem_util_pct": {
+          "min": 0,
+          "max": 0
+        }
+      },
+      "stages": null,
+      "cases": [
+        {
+          "seed": 1,
+          "status": "ok",
+          "seconds": 0.002571825,
+          "memory_mb": 77,
+          "passed": true,
+          "encoding_s": null,
+          "encrypt_s": null,
+          "decrypt_s": null,
+          "decoding_s": null,
+          "result_level": null,
+          "ciphertexts_in": null,
+          "ciphertexts_out": null,
+          "note": null,
+          "output_sha": "8621a716baa0d514f80b62f537a58ff57cab38e739a3017263693d1861647539"
+        },
+        {
+          "seed": 2,
+          "status": "ok",
+          "seconds": 0.002523491,
+          "memory_mb": 77,
+          "passed": true,
+          "encoding_s": null,
+          "encrypt_s": null,
+          "decrypt_s": null,
+          "decoding_s": null,
+          "result_level": null,
+          "ciphertexts_in": null,
+          "ciphertexts_out": null,
+          "note": null,
+          "output_sha": "feb8aab066c302405911952ef84e3a5b10e57b2675bc4196d8e5ca3a143b2342"
+        }
+      ]
+    }
+  ],
+  "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+  "finished_at": "2026-09-16T16:09:05.218Z",
+  "failure": null
+}

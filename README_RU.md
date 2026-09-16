@@ -3,6 +3,26 @@
 Задача: `polynomial-multiplication/negacyclic@1.0.0`,
 `c = a*b mod (X^N+1, q)`. Основная точка: `N=32768`, `W=868`, `L=28`.
 
+**Официальный результат 16 сентября 2026: 20/20, медиана 2,533 мс,
+5-е место из 6 ранжированных участников.**
+GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
+Сабмит принят в соревнование, исходники опубликованы:
+https://github.com/ilyausmanov2015/fherma-polymul-baseline
+
+| Запуск | Проверено | Медиана | Диапазон |
+|---|---:|---:|---:|
+| Первичная проверка | 2/2 | 2,548 мс | 2,523–2,572 мс |
+| Соревновательный | 20/20 | 2,533 мс | 2,492–2,631 мс |
+
+Оба запуска измерили коммит `d736e66ed00733c232280948b3e7726e231d0243`.
+Два дополнительных прогревочных случая в каждом запуске также прошли,
+но не входят в score. CUDA 12.8.61, cuPQC 0.6.0.
+
+[Официальный полный запуск](https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aaabf591be2e96f7342c7d1)
+и [лидерборд](https://www.fherma.io/kernels/polynomial-multiplication/challenges/polynomial-multiplication-2025?tab=leaderboard).
+JSON-отчёты: `results/official-smoke.json`, `results/official-challenge.json`.
+Место предварительное; на момент проверки лидер — 260 мкс, baseline медленнее в 9,75 раза.
+
 ## Реализация
 
 `solve.cu` — точный radix-2 NTT с арифметикой NVIDIA cuPQC BigInt:
@@ -68,11 +88,11 @@ cmake --build build -j
 
 **Это проверка алгебры и индексации, не проверка CUDA/cuPQC на GPU.**
 CPU-время эмуляции не является результатом для лидерборда.
-Официального GPU-результата пока нет.
+Официальные GPU-измерения приведены в начале документа.
 
 ## Сабмит
 
-Приватный черновик FHERMA:
+Приватная карточка реализации FHERMA (результат участвует в лидерборде):
 https://www.fherma.io/kernels/polynomial-multiplication/ilya-usmanov/ntt-cupqc-baseline
 
 - implementation ID: `6aaabc211be2e96f7342bb92`
@@ -89,6 +109,7 @@ https://www.fherma.io/kernels/polynomial-multiplication/ilya-usmanov/ntt-cupqc-b
 
 ```sh
 python tools/fherma_submit.py status
+python tools/fherma_submit.py history
 python tools/fherma_submit.py attach --repository https://github.com/ilyausmanov2015/fherma-polymul-baseline
 python tools/fherma_submit.py benchmark --seeds 2
 # После успешной проверки сборки и результата:
@@ -99,8 +120,10 @@ python tools/fherma_submit.py run RUN_ID
 `attach` по умолчанию закрепляет текущий `HEAD`. Для приватного GitHub-репозитория
 нужен отдельный read-only clone token в форме FHERMA. Общий токен GitHub CLI
 автоматически в FHERMA не передаётся.
-Команды `benchmark` и `enter` пока подготовлены, но не исполнялись: первый
-официальный запуск требует доступного репозитория. Команда `status` проверена.
+Команды `status`, `attach`, `benchmark`, `enter` и `history` проверены на платформе.
+Текущая карточка закреплена за измеренным коммитом `d736e66`; последующие коммиты
+с отчётами и утилитами не меняют CUDA-код и автоматически не перезаписывают
+измеренный результат.
 
 ## Источники
 

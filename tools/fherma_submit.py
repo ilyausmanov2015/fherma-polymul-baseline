@@ -27,6 +27,22 @@ BASE='https://www.fherma.io'
 PAGE=f'/kernels/{KERNEL}/{OWNER}/{SLUG}'
 API_PATH=f'/kernels/{KERNEL}/implementations/{SLUG}'
 
+def history():
+    response=httpx.get(BASE+PAGE,cookies={'fherma_session':load().token},
+                       headers={'RSC':'1'},timeout=30)
+    response.raise_for_status()
+    # RSC contains length-prefixed text chunks (build logs) and is not JSONL.
+    # Decode only the JSON value of the history prop; ignore reference aliases.
+    found=[]
+    for match in re.finditer(r'"history":',response.text):
+        try: value,_=json.JSONDecoder().raw_decode(response.text[match.end():])
+        except ValueError: continue
+        if isinstance(value,list): found.append(value)
+    if not found: raise RuntimeError('No run history returned; check authentication and page format')
+    path=ROOT/'local'/'history.json';path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(found[0],indent=2))
+    return found[0]
+
 def server_action(page, name, args):
     profile=load()
     if not profile.token: raise RuntimeError('Authenticate with fherma auth login first')
@@ -62,12 +78,15 @@ def server_action(page, name, args):
 def main():
     parser=argparse.ArgumentParser(); commands=parser.add_subparsers(dest='command',required=True)
     commands.add_parser('status')
+    commands.add_parser('history')
     attach=commands.add_parser('attach');attach.add_argument('--repository',required=True)
     attach.add_argument('--commit',help='Defaults to current HEAD')
     bench=commands.add_parser('benchmark');bench.add_argument('--seeds',type=int,default=2)
     commands.add_parser('enter')
     run=commands.add_parser('run');run.add_argument('id')
     args=parser.parse_args()
+    if args.command=='history':
+        print(json.dumps(history(),indent=2));return
     if args.command=='benchmark':
         if not 1<=args.seeds<=20: parser.error('Use 1..20 seeds per baseline run')
         print(json.dumps(server_action(PAGE,'runBenchmark',[KERNEL,SLUG,{
