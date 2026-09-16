@@ -1,4 +1,4 @@
-# FHERMA: baseline негaциклического умножения
+# FHERMA: baseline негациклического умножения
 
 Задача: `polynomial-multiplication/negacyclic@1.0.0`,
 `c = a*b mod (X^N+1, q)`. Основная точка: `N=32768`, `W=868`, `L=28`.
@@ -84,6 +84,23 @@ https://www.fherma.io/kernels/polynomial-multiplication/ilya-usmanov/ntt-cupqc-b
 
 Токены не входят в репозиторий. FHERMA CLI читает локальный
 `~/.fherma/config.toml`; GitHub CLI использует свою авторизацию.
+
+После публикации точного коммита в доступном runner репозитории:
+
+```sh
+python tools/fherma_submit.py status
+python tools/fherma_submit.py attach --repository https://github.com/ilyausmanov2015/fherma-polymul-baseline
+python tools/fherma_submit.py benchmark --seeds 2
+# После успешной проверки сборки и результата:
+python tools/fherma_submit.py enter
+python tools/fherma_submit.py run RUN_ID
+```
+
+`attach` по умолчанию закрепляет текущий `HEAD`. Для приватного GitHub-репозитория
+нужен отдельный read-only clone token в форме FHERMA. Общий токен GitHub CLI
+автоматически в FHERMA не передаётся.
+Команды `benchmark` и `enter` пока подготовлены, но не исполнялись: первый
+официальный запуск требует доступного репозитория. Команда `status` проверена.
 
 ## Источники
 
