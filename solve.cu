@@ -1,8 +1,11 @@
+#ifndef FHERMA_TAIL_TABLES
+#define FHERMA_TAIL_TABLES 1
+#endif
 #ifndef FHERMA_FUSED_PREPARE
-#define FHERMA_FUSED_PREPARE 1
+#define FHERMA_FUSED_PREPARE 0
 #endif
 #ifndef FHERMA_SPECIAL_ADD_SUB
-#define FHERMA_SPECIAL_ADD_SUB 1
+#define FHERMA_SPECIAL_ADD_SUB 0
 #endif
 #ifndef FHERMA_HOST_PROFILE
 #define FHERMA_HOST_PROFILE 0
@@ -227,6 +230,7 @@ struct State {
     uint32_t n=0, logn=0;
     uint32_t *q=nullptr,*roots=nullptr,*twist=nullptr,*inv_twist=nullptr,*scale=nullptr;
     uint32_t *input=nullptr,*ab=nullptr,*c=nullptr;
+    uint32_t *tail_twist=nullptr,*tail_inv_twist=nullptr;
 #if FHERMA_PINNED
     uint32_t *host_input=nullptr,*host_output=nullptr;
 #endif
@@ -240,6 +244,7 @@ struct State {
 #endif
         cudaFree(q); cudaFree(roots); cudaFree(twist); cudaFree(inv_twist);
         cudaFree(scale); cudaFree(input); cudaFree(ab); cudaFree(c);
+        cudaFree(tail_twist); cudaFree(tail_inv_twist);
 #if FHERMA_PINNED
         cudaFreeHost(host_input); cudaFreeHost(host_output);
 #endif
@@ -346,6 +351,19 @@ __global__ void transpose_tail(const uint32_t* source,uint32_t* dest,unsigned n)
     for(unsigned dy=0;dy<32;dy+=8)
         dest[(column+y+dy)*128+row+x]=tile[x*33+y+dy];
 }
+// Stage-major twiddles, with consecutive j within each fixed low-bit column.
+// The conventional table becomes strided after the coefficient transpose.
+__global__ void make_tail_tables(const uint32_t* forward,const uint32_t* inverse,
+                                 uint32_t* out_forward,uint32_t* out_inverse,unsigned n) {
+    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=32512) return;
+    unsigned half=1;
+    while(i>=256*(2*half-1)) half*=2;
+    unsigned within=i-256*(half-1),column=within/half,j=within%half;
+    unsigned exponent=(column+256*j)*(128/half);
+    store_coeff(load_coeff(forward,exponent,n),out_forward,i,n);
+    store_coeff(load_coeff(inverse,exponent,n),out_inverse,i,n);
+}
 // The seven remaining stages are independent for each low eight-bit column.
 // After the transpose, two entire columns fit one shared-memory tile.
 __global__ void tail_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsigned n) {
@@ -361,7 +379,8 @@ __global__ void tail_stages(uint32_t* values,const uint32_t* table,const uint32_
         unsigned j=k&(half-1), i=offset+2*(k-j)+j;
         unsigned exponent=(column+256*j)*(n/(half*256));
         const Big u=load_coeff(tile,i,256),v=load_coeff(tile,i+half,256);
-        const Big tw=load_coeff(table,exponent,n);
+        unsigned twiddle_i=FHERMA_TAIL_TABLES ? (256*(half-1)+column*half+j) : exponent;
+        const Big tw=load_coeff(table,twiddle_i,n);
         const Big m=(FHERMA_SKIP_IDENTITY && exponent==0) ? v : multiply(v,tw,q);
         store_coeff(butterfly_add(u,m,q),tile,i,256);
         store_coeff(butterfly_sub(u,m,q),tile,i+half,256);
@@ -404,7 +423,7 @@ void launch_ntt(State& s,cudaStream_t stream=nullptr) {
     if(FHERMA_FUSED_TAIL && s.n==32768) {
         dim3 planes(32*L,2),tiles(128,2);
         transpose_tail<<<planes,256,0,stream>>>(s.ab,s.input,s.n);
-        tail_stages<<<tiles,128,0,stream>>>(s.input,s.twist,s.q,s.n);
+        tail_stages<<<tiles,128,0,stream>>>(s.input,FHERMA_TAIL_TABLES?s.tail_twist:s.twist,s.q,s.n);
         forward_values=s.input;
     } else {
         for(unsigned half=first;half<s.n;half*=2) stage<<<halves,128,0,stream>>>(s.ab,s.twist,s.q,s.n,half);
@@ -419,7 +438,7 @@ void launch_ntt(State& s,cudaStream_t stream=nullptr) {
     uint32_t* inverse_values=s.c;
     if(FHERMA_FUSED_TAIL && s.n==32768) {
         transpose_tail<<<32*L,256,0,stream>>>(s.c,s.ab,s.n);
-        tail_stages<<<128,128,0,stream>>>(s.ab,s.inv_twist,s.q,s.n);
+        tail_stages<<<128,128,0,stream>>>(s.ab,FHERMA_TAIL_TABLES?s.tail_inv_twist:s.inv_twist,s.q,s.n);
         inverse_values=s.ab;
     } else {
         for(unsigned half=first;half<s.n;half*=2) stage<<<halves.x,128,0,stream>>>(s.c,s.inv_twist,s.q,s.n,half);
@@ -470,7 +489,13 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaMemcpy(s->q,p.q.data.data(),L*4,cudaMemcpyHostToDevice),"copy q");
     check(cudaMemcpy(s->roots,packed.data(),3*L*4,cudaMemcpyHostToDevice),"copy roots");
     make_tables<<<(p.N*FHERMA_TPI+127)/128,128>>>(s->q,s->roots,s->twist,s->inv_twist,s->scale,p.N);
-    check(cudaGetLastError(),"table launch"); check(cudaDeviceSynchronize(),"table setup");
+    check(cudaGetLastError(),"table launch");
+    if(FHERMA_FUSED_TAIL && FHERMA_TAIL_TABLES && p.N==32768) {
+        alloc(&s->tail_twist,p.N); alloc(&s->tail_inv_twist,p.N);
+        make_tail_tables<<<254,128>>>(s->twist,s->inv_twist,s->tail_twist,s->tail_inv_twist,p.N);
+        check(cudaGetLastError(),"tail table launch");
+    }
+    check(cudaDeviceSynchronize(),"table setup");
 #if FHERMA_PROFILE
     for(auto& e:s->events) check(cudaEventCreate(&e),"profile create");
 #endif
