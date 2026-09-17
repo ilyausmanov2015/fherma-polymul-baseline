@@ -1,3 +1,9 @@
+#ifndef FHERMA_OUTPUT_ALLOCATOR_SPIN
+#define FHERMA_OUTPUT_ALLOCATOR_SPIN 1
+#endif
+#ifndef FHERMA_OUTPUT_ALLOCATOR_CPU_INDEX
+#define FHERMA_OUTPUT_ALLOCATOR_CPU_INDEX 16
+#endif
 #ifndef FHERMA_FUSED_UNROLL
 #define FHERMA_FUSED_UNROLL 1
 #endif
@@ -29,7 +35,7 @@
 #define FHERMA_INPUT_GRAPH_EARLY 0
 #endif
 #ifndef FHERMA_ASYNC_OUTPUT_LATE
-#define FHERMA_ASYNC_OUTPUT_LATE 1
+#define FHERMA_ASYNC_OUTPUT_LATE 0
 #endif
 #ifndef FHERMA_INPUT_WORKER_PIPELINE
 #define FHERMA_INPUT_WORKER_PIPELINE 0
@@ -56,7 +62,7 @@
 #define FHERMA_INPUT_WORKERS_ONLY 0
 #endif
 #ifndef FHERMA_ASYNC_OUTPUT_ALLOC
-#define FHERMA_ASYNC_OUTPUT_ALLOC 0
+#define FHERMA_ASYNC_OUTPUT_ALLOC 1
 #endif
 #ifndef FHERMA_CRT_LIMB_SUMS
 #define FHERMA_CRT_LIMB_SUMS 0
@@ -101,7 +107,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 0
+#define FHERMA_HOST_PROFILE 1
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -185,7 +191,7 @@
 #define FHERMA_COPY_THREADS 16
 #endif
 #ifndef FHERMA_OUTPUT_THREADS
-#define FHERMA_OUTPUT_THREADS 2
+#define FHERMA_OUTPUT_THREADS (FHERMA_COPY_THREADS<8 ? FHERMA_COPY_THREADS : 8)
 #endif
 #ifndef FHERMA_SPIN_COPY
 #define FHERMA_SPIN_COPY 1
@@ -1472,6 +1478,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     [[maybe_unused]] size_t words=size_t(s.n)*quartic::AbiWords,bytes=words*4;
     if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
     fherma::Outputs output;output.c.shape={s.n,quartic::AbiWords};
+#if FHERMA_HOST_PROFILE
+    auto host_run_start=std::chrono::steady_clock::now();
+#endif
 #if FHERMA_ASYNC_OUTPUT_ALLOC
     std::optional<HostOutputAllocator::Work> allocation_task;
     auto prepare_output=[&] {
@@ -1642,6 +1651,10 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         host_us(alloc_end,unpack_start),host_us(unpack_start,unpack_end));
     std::fprintf(stderr,"HOST_ALLOC_US reserve=%.3f prefault=%.3f zero=%.3f\n",
         host_us(alloc_start,reserved_at),host_us(reserved_at,faulted_at),host_us(faulted_at,alloc_end));
+#if FHERMA_ASYNC_OUTPUT_ALLOC
+    std::fprintf(stderr,"ASYNC_ALLOC_US before_pack=%.3f worker_resize=%.3f\n",
+        host_us(host_run_start,pack_start),s.output_allocator.resize_us());
+#endif
 #endif
 #if FHERMA_PROFILE
     const char* names[]={"h2d","prepare","forward","product","inverse","finish","d2h"};

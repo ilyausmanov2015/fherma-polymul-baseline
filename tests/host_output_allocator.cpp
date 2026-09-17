@@ -18,6 +18,9 @@ int main() {
             HostOutputAllocator::Work work(allocator,output,words);
             if(trial%3) work.wait(); // Other iterations exercise the RAII join.
         }
+#if FHERMA_HOST_PROFILE
+        assert(allocator.resize_us()>=0);
+#endif
         assert(std::all_of(output.begin(),output.end(),[](auto x) {return x==0;}));
         std::fill(output.begin(),output.end(),trial+1);
         if(trial%10==1) retained.push_back(std::move(output));

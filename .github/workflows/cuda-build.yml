@@ -35,6 +35,8 @@ jobs:
         run: |
           g++ -O2 -std=c++17 -pthread -I. tests/host_output_allocator.cpp -o /tmp/output-allocator-check
           /tmp/output-allocator-check
+          g++ -O2 -std=c++17 -pthread -I. -DFHERMA_OUTPUT_ALLOCATOR_SPIN=1 -DFHERMA_OUTPUT_ALLOCATOR_CPU_INDEX=16 -DFHERMA_HOST_PROFILE=1 tests/host_output_allocator.cpp -o /tmp/output-allocator-spin-check
+          /tmp/output-allocator-spin-check
       - name: Check persistent copy handoff
         run: |
           for mode in 0 1; do
