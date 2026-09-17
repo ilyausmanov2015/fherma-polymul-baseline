@@ -1,8 +1,11 @@
+#ifndef FHERMA_HARVEY_BITS
+#define FHERMA_HARVEY_BITS 4
+#endif
 #ifndef FHERMA_HARVEY
 #define FHERMA_HARVEY 1
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
-#define FHERMA_DEFER_MAIN_PIN 1
+#define FHERMA_DEFER_MAIN_PIN 0
 #endif
 #ifndef FHERMA_CACHED_VECTOR
 #define FHERMA_CACHED_VECTOR 0
@@ -23,7 +26,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 1
+#define FHERMA_HOST_PROFILE 0
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -62,7 +65,7 @@
 #define FHERMA_QUARTIC_COMPACT_SCALE 0
 #endif
 #ifndef FHERMA_OVERLAP_PREPARE
-#define FHERMA_OVERLAP_PREPARE 0
+#define FHERMA_OVERLAP_PREPARE 1
 #endif
 #ifndef FHERMA_CRT_TILED_OUTPUT
 #define FHERMA_CRT_TILED_OUTPUT 1
@@ -80,10 +83,10 @@
 #define FHERMA_RNS_FUSED_TRANSPOSE 1
 #endif
 #ifndef FHERMA_PIPELINE_INPUT
-#define FHERMA_PIPELINE_INPUT 1
+#define FHERMA_PIPELINE_INPUT 4
 #endif
 #ifndef FHERMA_PIPELINE_OUTPUT
-#define FHERMA_PIPELINE_OUTPUT 1
+#define FHERMA_PIPELINE_OUTPUT 8
 #endif
 #ifndef FHERMA_RNS_RADIX4
 #define FHERMA_RNS_RADIX4 1
@@ -98,7 +101,7 @@
 #define FHERMA_RNS_TAIL 1
 #endif
 #ifndef FHERMA_PROFILE
-#define FHERMA_PROFILE 1
+#define FHERMA_PROFILE 0
 #endif
 #ifndef FHERMA_GRAPH
 #define FHERMA_GRAPH 1
@@ -439,7 +442,13 @@ template<bool Inverse,bool Lazy> __device__ inline void harvey_pair(uint32_t& u,
         uint32_t sum=ntt_add<Lazy>(u,v,p);v=ntt_sub<Lazy>(u,v,p);u=sum;
     }
 }
+constexpr unsigned HarveyBits=FHERMA_HARVEY_BITS,HarveyRadix=1u<<HarveyBits,HarveyThreads=Tile/HarveyRadix;
+static_assert(HarveyBits==3 || HarveyBits==4,"Harvey radix 8 or 16");
 template<bool Inverse> __device__ inline unsigned harvey_index(unsigned x) {
+    if constexpr(HarveyBits==4) {
+        if constexpr(Inverse) return x^((x>>5)&7)^(((x>>8)&1)*24);
+        return x^((x>>5)&1)^(((x>>6)&1)*6)^(((x>>7)&3)<<3);
+    }
     if constexpr(Inverse) return small_index(x);
     return small_dif_index(x);
 }
@@ -447,23 +456,24 @@ template<bool Inverse> __device__ inline unsigned harvey_index(unsigned x) {
 template<bool Inverse,bool Product,bool Lazy> __global__ void harvey_small(
     uint32_t* values,const SmallMod* mods,const Twiddle* roots,unsigned n,const uint32_t* paired=nullptr,unsigned logn=0) {
     __shared__ uint32_t tile[Tile];
+    constexpr unsigned Passes=10/HarveyBits,Remaining=10%HarveyBits,LastRadix=1u<<Remaining;
     unsigned t=threadIdx.x,pi=blockIdx.y%ModCount,begin=blockIdx.x*Tile;
     values+=blockIdx.y*n+begin;roots+=pi*n;
     SmallMod modulus=mods[pi];uint32_t p=modulus.p;
     #pragma unroll
-    for(unsigned k=0;k<8;++k) tile[harvey_index<Inverse>(t+k*Tile/8)]=small_value<Product>(values,paired,t+k*Tile/8,begin,blockIdx.y,n,logn,modulus);
+    for(unsigned k=0;k<HarveyRadix;++k) tile[harvey_index<Inverse>(t+k*HarveyThreads)]=small_value<Product>(values,paired,t+k*HarveyThreads,begin,blockIdx.y,n,logn,modulus);
     __syncthreads();
     #pragma unroll
-    for(unsigned pass=0;pass<3;++pass) {
-        unsigned half=Inverse ? (1u<<(3*pass)) : (128u>>(3*pass));
-        unsigned j=t&(half-1),i=8*(t-j)+j;uint32_t x[8];
+    for(unsigned pass=0;pass<Passes;++pass) {
+        unsigned half=Inverse ? (1u<<(HarveyBits*pass)) : (1u<<(10-HarveyBits*(pass+1)));
+        unsigned j=t&(half-1),i=HarveyRadix*(t-j)+j;uint32_t x[HarveyRadix];
         #pragma unroll
-        for(unsigned k=0;k<8;++k) x[k]=tile[harvey_index<Inverse>(i+k*half)];
+        for(unsigned k=0;k<HarveyRadix;++k) x[k]=tile[harvey_index<Inverse>(i+k*half)];
         #pragma unroll
-        for(unsigned phase=0;phase<3;++phase) {
-            unsigned step=Inverse ? (1u<<phase) : (4u>>phase),h=step*half;
+        for(unsigned phase=0;phase<HarveyBits;++phase) {
+            unsigned step=Inverse ? (1u<<phase) : ((HarveyRadix/2)>>phase),h=step*half;
             #pragma unroll
-            for(unsigned group=0;group<8;group+=2*step) {
+            for(unsigned group=0;group<HarveyRadix;group+=2*step) {
                 Twiddle w=roots[n/(2*h)+(begin+i+group*half)/(2*h)];
                 #pragma unroll
                 for(unsigned lane=0;lane<step;++lane)
@@ -471,15 +481,28 @@ template<bool Inverse,bool Product,bool Lazy> __global__ void harvey_small(
             }
         }
         #pragma unroll
-        for(unsigned k=0;k<8;++k) tile[harvey_index<Inverse>(i+k*half)]=x[k];
+        for(unsigned k=0;k<HarveyRadix;++k) tile[harvey_index<Inverse>(i+k*half)]=x[k];
         __syncthreads();
     }
     #pragma unroll
-    for(unsigned k=0;k<4;++k) {
-        unsigned j=t+k*Tile/8,i=Inverse ? j : 2*j,h=Inverse ? Tile/2 : 1;
-        uint32_t u=tile[harvey_index<Inverse>(i)],v=tile[harvey_index<Inverse>(i+h)];
-        harvey_pair<Inverse,Lazy>(u,v,roots[n/(2*h)+(begin+i)/(2*h)],p);
-        values[i]=u;values[i+h]=v;
+    for(unsigned k=0;k<HarveyRadix/LastRadix;++k) {
+        unsigned j=t+k*HarveyThreads,half=Inverse ? Tile/LastRadix : 1;
+        unsigned i=Inverse ? j : LastRadix*j;uint32_t x[LastRadix];
+        #pragma unroll
+        for(unsigned lane=0;lane<LastRadix;++lane) x[lane]=tile[harvey_index<Inverse>(i+lane*half)];
+        #pragma unroll
+        for(unsigned phase=0;phase<Remaining;++phase) {
+            unsigned step=Inverse ? (1u<<phase) : ((LastRadix/2)>>phase),h=step*half;
+            #pragma unroll
+            for(unsigned group=0;group<LastRadix;group+=2*step) {
+                Twiddle w=roots[n/(2*h)+(begin+i+group*half)/(2*h)];
+                #pragma unroll
+                for(unsigned lane=0;lane<step;++lane)
+                    harvey_pair<Inverse,Lazy>(x[group+lane],x[group+lane+step],w,p);
+            }
+        }
+        #pragma unroll
+        for(unsigned lane=0;lane<LastRadix;++lane) values[i+lane*half]=x[lane];
     }
 }
 template<bool Inverse,bool Lazy> __global__ void harvey_tail(const uint32_t* source,uint32_t* destination,
@@ -798,7 +821,7 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
         dim3 tails(128,2*PrimeCount),tiles(s.n/Tile,2*PrimeCount);
         if(harvey) {
             harvey_tail<false,Lazy><<<tails,128,0,stream>>>(prepared,s.scratch,s.mods,s.forward,s.n);
-            harvey_small<false,false,Lazy><<<tiles,Tile/8,0,stream>>>(s.scratch,s.mods,s.forward,s.n);
+            harvey_small<false,false,Lazy><<<tiles,HarveyThreads,0,stream>>>(s.scratch,s.mods,s.forward,s.n);
         } else {
         tail_dif_rns<Lazy><<<tails,128,0,stream>>>(prepared,s.scratch,s.mods,s.tail_forward,s.n);
         small_dif_rns<Lazy><<<tiles,Tile/8,0,stream>>>(s.scratch,s.mods,s.small_forward,s.n);
@@ -833,9 +856,9 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
         dim3 tiles(s.n/Tile,PrimeCount);
         if(harvey) {
             if(fused_product)
-                harvey_small<true,true,Lazy><<<tiles,Tile/8,0,stream>>>(s.c,s.mods,s.inverse,s.n,forward_values,s.logn);
+                harvey_small<true,true,Lazy><<<tiles,HarveyThreads,0,stream>>>(s.c,s.mods,s.inverse,s.n,forward_values,s.logn);
             else
-                harvey_small<true,false,Lazy><<<tiles,Tile/8,0,stream>>>(s.c,s.mods,s.inverse,s.n);
+                harvey_small<true,false,Lazy><<<tiles,HarveyThreads,0,stream>>>(s.c,s.mods,s.inverse,s.n);
         } else {
         if(fused_product)
             small_rns<true,Lazy><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n,forward_values,s.logn);

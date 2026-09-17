@@ -41,3 +41,21 @@ for warp in range(4):
             assert len({dif_swizzle(2 * (t + register * 128) + parity) % 32
                         for t in range(warp * 32, (warp + 1) * 32)}) == 32
 print("DIF final binary stage: multiplicity 1")
+
+for inverse,halves in [(True,[1,16,256]),(False,[64,4,1])]:
+    def layout(x):
+        if inverse: return x^((x>>5)&7)^(((x>>8)&1)*24)
+        return x^((x>>5)&1)^(((x>>6)&1)*6)^(((x>>7)&3)<<3)
+    assert sorted(layout(x) for x in range(1024))==list(range(1024))
+    for stage,half in enumerate(halves):
+        radix=16 if stage<2 else 4
+        for warp in range(2):
+            for repeat in range(1 if stage<2 else 4):
+                for register in range(radix):
+                    addresses=[]
+                    for t in range(warp*32,(warp+1)*32):
+                        t+=repeat*64
+                        j=t&(half-1)
+                        addresses.append(radix*(t-j)+j+register*half)
+                    assert len({layout(i)%32 for i in addresses})==32
+        print(f"Harvey radix16 inverse={inverse} half={half}: multiplicity 1")
