@@ -1,5 +1,8 @@
+#ifndef FHERMA_ASYNC_OUTPUT_LATE
+#define FHERMA_ASYNC_OUTPUT_LATE 1
+#endif
 #ifndef FHERMA_INPUT_WORKER_PIPELINE
-#define FHERMA_INPUT_WORKER_PIPELINE 1
+#define FHERMA_INPUT_WORKER_PIPELINE 0
 #endif
 #ifndef FHERMA_OUTPUT_WORKER_PIPELINE
 #define FHERMA_OUTPUT_WORKER_PIPELINE 0
@@ -23,7 +26,7 @@
 #define FHERMA_INPUT_WORKERS_ONLY 0
 #endif
 #ifndef FHERMA_ASYNC_OUTPUT_ALLOC
-#define FHERMA_ASYNC_OUTPUT_ALLOC 0
+#define FHERMA_ASYNC_OUTPUT_ALLOC 1
 #endif
 #ifndef FHERMA_CRT_LIMB_SUMS
 #define FHERMA_CRT_LIMB_SUMS 0
@@ -125,7 +128,7 @@
 #define FHERMA_RNS_FUSED_TRANSPOSE 1
 #endif
 #ifndef FHERMA_PIPELINE_INPUT
-#define FHERMA_PIPELINE_INPUT 8
+#define FHERMA_PIPELINE_INPUT 4
 #endif
 #ifndef FHERMA_PIPELINE_OUTPUT
 #define FHERMA_PIPELINE_OUTPUT 8
@@ -171,6 +174,7 @@
 #include "host_output_allocator.h"
 #include "input_pipeline.h"
 #include <memory>
+#include <optional>
 #include <cstring>
 #include <chrono>
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL && FHERMA_GRAPH
@@ -1182,6 +1186,8 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
     fherma::Outputs output;output.c.shape={s.n,quartic::AbiWords};
 #if FHERMA_ASYNC_OUTPUT_ALLOC
+    std::optional<HostOutputAllocator::Work> allocation_task;
+    auto prepare_output=[&] {
 #if FHERMA_ASYNC_OUTPUT_PREFAULT
     // Allocate and fault pages with the pool before it starts packing input.
     // The dedicated worker then only initializes this fresh vector's elements,
@@ -1189,7 +1195,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     output.c.data.reserve(words);
     s.copy.prefault(output.c.data.data(),bytes);
 #endif
-    HostOutputAllocator::Work allocation_task(s.output_allocator,output.c.data,words);
+        allocation_task.emplace(s.output_allocator,output.c.data,words);
+    };
+    if(!FHERMA_ASYNC_OUTPUT_LATE) prepare_output();
 #endif
     try {
 #if FHERMA_PROFILE || FHERMA_HOST_PROFILE
@@ -1227,6 +1235,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_PROFILE || FHERMA_HOST_PROFILE
     auto pack_end=std::chrono::steady_clock::now();
 #endif
+#if FHERMA_ASYNC_OUTPUT_ALLOC && FHERMA_ASYNC_OUTPUT_LATE
+    prepare_output();
+#endif
     if(FHERMA_OUTPUT_SPARE) output.c.data.swap(s.spare_output);
 #if FHERMA_GRAPH
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
@@ -1256,7 +1267,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         auto alloc_start=std::chrono::steady_clock::now();
 #endif
 #if FHERMA_ASYNC_OUTPUT_ALLOC
-        allocation_task.wait();
+        allocation_task->wait();
 #if FHERMA_HOST_PROFILE
         auto reserved_at=std::chrono::steady_clock::now(),faulted_at=reserved_at;
 #endif
