@@ -1,3 +1,6 @@
+#ifndef FHERMA_CRT_PARTS
+#define FHERMA_CRT_PARTS 4
+#endif
 #ifndef FHERMA_RNS_TAIL
 #define FHERMA_RNS_TAIL 1
 #endif
@@ -30,6 +33,8 @@ namespace {
 using namespace rns;
 using WideBI=decltype(cupqc::BitWidth<AccumWords*32>()+cupqc::SM<800>()+cupqc::Thread());
 using AbiBI=decltype(cupqc::BitWidth<AbiWords*32>()+cupqc::SM<800>()+cupqc::Thread());
+constexpr unsigned CrtOutputs=128/FHERMA_CRT_PARTS;
+static_assert(FHERMA_CRT_PARTS==1 || FHERMA_CRT_PARTS==2 || FHERMA_CRT_PARTS==4 || FHERMA_CRT_PARTS==8,"CRT groups must evenly divide a CUDA block");
 using Wide=typename WideBI::bigint;
 using Big=typename AbiBI::bigint;
 __device__ uint32_t add_mod(uint32_t a,uint32_t b,uint32_t p) {
@@ -158,12 +163,12 @@ __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const 
                                 const Twiddle* scales,const uint32_t* bases,
                                 const uint32_t* q_words,const uint32_t* product_mod_q,
                                 unsigned n) {
-    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
-    if(i>=n) return;
+    unsigned lane=threadIdx.x%CrtOutputs,part=threadIdx.x/CrtOutputs;
+    unsigned i=blockIdx.x*CrtOutputs+lane;
     Wide accumulator(uint32_t(0));
     uint64_t fraction=0;uint32_t alpha=0;
     #pragma unroll 1
-    for(unsigned prime_i=0;prime_i<PrimeCount;++prime_i) {
+    for(unsigned prime_i=part;i<n && prime_i<PrimeCount;prime_i+=FHERMA_CRT_PARTS) {
         SmallMod modulus=mods[prime_i];
         // The scale already contains inverse(P/pi mod pi).
         uint32_t t=shoup(residues[prime_i*n+i],scales[prime_i*n+i],modulus.p);
@@ -171,6 +176,28 @@ __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const 
         alpha+=next<fraction;fraction=next;
         accumulator=accumulator+Wide(bases,prime_i).mul_scalar(t);
     }
+#if FHERMA_CRT_PARTS>1
+    __shared__ uint32_t partial_words[128*AccumWords],partial_alpha[128];
+    __shared__ uint64_t partial_fraction[128];
+    #pragma unroll
+    for(unsigned word=0;word<AccumWords;++word) partial_words[word*128+threadIdx.x]=accumulator[word];
+    partial_alpha[threadIdx.x]=alpha;partial_fraction[threadIdx.x]=fraction;
+    __syncthreads();
+    if(part!=0 || i>=n) return;
+    accumulator=Wide(uint32_t(0));fraction=0;alpha=0;
+    #pragma unroll 1
+    for(unsigned group=0;group<FHERMA_CRT_PARTS;++group) {
+        unsigned source=group*CrtOutputs+lane;
+        Wide contribution(uint32_t(0));
+        #pragma unroll
+        for(unsigned word=0;word<AccumWords;++word) contribution[word]=partial_words[word*128+source];
+        accumulator=accumulator+contribution;
+        uint64_t next=fraction+partial_fraction[source];
+        alpha+=partial_alpha[source]+uint32_t(next<fraction);fraction=next;
+    }
+#else
+    if(i>=n) return;
+#endif
     // Setup proves |integer convolution| < P/4. The fixed-point error is
     // less than 57*2^31/2^64 < 1/4, so rounding the quotient is exact even
     // for zero, tiny coefficients, and the most negative valid input.
@@ -258,7 +285,8 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     } else for(unsigned h=first;h<s.n;h*=2)
         stage_rns<<<inverse_half,128,0,stream>>>(s.c,s.mods,s.inverse,s.n,h,s.n/h);
     mark(s,5,stream);
-    reconstruct_rns<<<full.x,128,0,stream>>>(inverse_values,s.input,s.mods,s.scale,s.bases,
+    unsigned crt_blocks=(s.n+CrtOutputs-1)/CrtOutputs;
+    reconstruct_rns<<<crt_blocks,128,0,stream>>>(inverse_values,s.input,s.mods,s.scale,s.bases,
                                             s.q,s.product_mod_q,s.n);
     mark(s,6,stream);
     check(cudaGetLastError(),"RNS kernels");
