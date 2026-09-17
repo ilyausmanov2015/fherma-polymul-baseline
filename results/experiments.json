@@ -1,0 +1,183 @@
+[
+  {
+    "id": "6aaabe9f199a4bc1dcaecc66",
+    "status": "finished",
+    "cases": 2,
+    "passed": 2,
+    "failure": null,
+    "init_s": 0.788621065,
+    "started_at": "2026-09-16T16:06:58.872Z",
+    "finished_at": "2026-09-16T16:09:05.218Z",
+    "commit": "d736e66ed00733c232280948b3e7726e231d0243",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 2,
+        "seeds": 2,
+        "seconds": {
+          "min": 0.002523491,
+          "median": 0.002547658,
+          "mean": 0.002547658,
+          "max": 0.002571825
+        }
+      }
+    ],
+    "profiles_us": []
+  },
+  {
+    "id": "6aaabf591be2e96f7342c7d1",
+    "status": "finished",
+    "cases": 20,
+    "passed": 20,
+    "failure": null,
+    "init_s": 0.448547625,
+    "started_at": "2026-09-16T16:10:01.640Z",
+    "finished_at": "2026-09-16T16:12:57.657Z",
+    "commit": "d736e66ed00733c232280948b3e7726e231d0243",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 20,
+        "seeds": 20,
+        "seconds": {
+          "min": 0.002492274,
+          "median": 0.0025326710000000002,
+          "mean": 0.0025343926500000008,
+          "max": 0.002631216
+        }
+      }
+    ],
+    "profiles_us": []
+  },
+  {
+    "id": "6aabc322e3bdd1a5530a4154",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.793200427,
+    "started_at": "2026-09-17T10:38:29.255Z",
+    "finished_at": "2026-09-17T10:40:47.075Z",
+    "commit": "ee46230d6f0a31ac15c51f36ed30c41f7a492854",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.002193092,
+          "median": 0.002204665,
+          "mean": 0.002209520666666667,
+          "max": 0.002230805
+        }
+      }
+    ],
+    "profiles_us": []
+  },
+  {
+    "id": "6aabc4a8e3bdd1a5530a4b8f",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.430124759,
+    "started_at": "2026-09-17T10:44:59.006Z",
+    "finished_at": "2026-09-17T10:46:55.745Z",
+    "commit": "43f87b1d05e85aa068c5214ea489debaad37a8d9",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.002048926,
+          "median": 0.002091898,
+          "mean": 0.002083227333333333,
+          "max": 0.002108858
+        }
+      }
+    ],
+    "profiles_us": []
+  },
+  {
+    "id": "6aabc549b615118421bf70e2",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.438462998,
+    "started_at": "2026-09-17T10:47:39.781Z",
+    "finished_at": "2026-09-17T10:49:11.727Z",
+    "commit": "f0a383d37389562fa2c7f5558caa692ad10110e1",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.001675781,
+          "median": 0.001689568,
+          "mean": 0.0016934460000000001,
+          "max": 0.001714989
+        }
+      }
+    ],
+    "profiles_us": [
+      {
+        "h2d": 675.072,
+        "prepare": 70.528,
+        "forward": 213.664,
+        "product": 20.384,
+        "inverse": 133.184,
+        "finish": 19.84,
+        "d2h": 1715.104
+      },
+      {
+        "h2d": 704.224,
+        "prepare": 31.488,
+        "forward": 204.8,
+        "product": 16.384,
+        "inverse": 133.12,
+        "finish": 16.384,
+        "d2h": 604.352
+      },
+      {
+        "h2d": 657.088,
+        "prepare": 31.264,
+        "forward": 204.8,
+        "product": 16.384,
+        "inverse": 131.072,
+        "finish": 16.384,
+        "d2h": 617.152
+      },
+      {
+        "h2d": 628.672,
+        "prepare": 31.104,
+        "forward": 202.752,
+        "product": 16.384,
+        "inverse": 129.056,
+        "finish": 16.352,
+        "d2h": 624.0
+      },
+      {
+        "h2d": 614.976,
+        "prepare": 28.512,
+        "forward": 204.8,
+        "product": 16.384,
+        "inverse": 133.12,
+        "finish": 16.384,
+        "d2h": 618.336
+      }
+    ]
+  }
+]
