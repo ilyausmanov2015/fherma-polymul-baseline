@@ -1,3 +1,6 @@
+#ifndef FHERMA_OUTPUT_APPEND
+#define FHERMA_OUTPUT_APPEND 1
+#endif
 #ifndef FHERMA_PAIRED_INPUT
 #define FHERMA_PAIRED_INPUT 1
 #endif
@@ -931,7 +934,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_HOST_PROFILE
         auto faulted_at=std::chrono::steady_clock::now();
 #endif
-        output.c.data.resize(words);
+        if(!FHERMA_OUTPUT_APPEND) output.c.data.resize(words);
 #if FHERMA_HOST_PROFILE
         auto alloc_end=std::chrono::steady_clock::now();
 #endif
@@ -951,10 +954,14 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
         check(cudaEventSynchronize(s.output_ready[part]),"RNS output segment ready");
         size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
-        s.copy.output(output.c.data.data()+begin,s.host_output+begin,(end-begin)*4);
+        if(FHERMA_OUTPUT_APPEND)
+            output.c.data.insert(output.c.data.end(),s.host_output+begin,s.host_output+end);
+        else s.copy.output(output.c.data.data()+begin,s.host_output+begin,(end-begin)*4);
     }
 #else
-    s.copy.output(output.c.data.data(),s.host_output,bytes);
+    if(FHERMA_OUTPUT_APPEND)
+        output.c.data.insert(output.c.data.end(),s.host_output,s.host_output+words);
+    else s.copy.output(output.c.data.data(),s.host_output,bytes);
 #endif
 #if FHERMA_PROFILE || FHERMA_HOST_PROFILE
     auto unpack_end=std::chrono::steady_clock::now();
