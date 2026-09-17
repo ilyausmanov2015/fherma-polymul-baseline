@@ -4,11 +4,23 @@
 #include <cupqc/bigint.hpp>
 #include <cuda_runtime.h>
 #include <memory>
+#ifndef FHERMA_MONTGOMERY
+#define FHERMA_MONTGOMERY 1
+#endif
 
 namespace {
 constexpr unsigned L=28;
 using BI=decltype(cupqc::BitWidth<L*32>()+cupqc::SM<800>()+cupqc::Thread());
 using Big=typename BI::bigint;
+#if FHERMA_MONTGOMERY
+using Mod=typename BI::modulus;
+__device__ Big encode(const Big& x,const Mod& q) { return x.to_montgomery(q); }
+__device__ Big decode(const Big& x,const Mod& q) { return x.from_montgomery(q); }
+__device__ Big multiply(const Big& a,const Big& b,const Mod& q) { return a.mul_montgomery(b,q); }
+#else
+using Mod=Big;
+__device__ Big encode(const Big& x,const Mod&) { return x; }
+__device__ Big decode(const Big& x,const Mod&) { return x; }
 // For q = 2^868-c, c < 2^28, a full product folds twice without division.
 // At each fold all intermediates fit the 896-bit cuPQC storage width.
 // q is supplied at setup; other moduli retain the general implementation.
@@ -26,6 +38,7 @@ __device__ Big multiply(const Big& a,const Big& b,const Big& q) {
     if(r>=q) r=r-q;
     return r;
 }
+#endif
 void check(cudaError_t e,const char* op) {
     if(e!=cudaSuccess) throw std::runtime_error(std::string(op)+": "+cudaGetErrorString(e));
 }
@@ -36,8 +49,8 @@ struct State {
     ~State() { cudaFree(q); cudaFree(roots); cudaFree(twist); cudaFree(inv_twist);
         cudaFree(scale); cudaFree(input); cudaFree(ab); cudaFree(c); }
 };
-__device__ Big pow_small(Big x,unsigned e,const Big& q) {
-    Big y(uint32_t(1));
+__device__ Big pow_small(Big x,unsigned e,const Mod& q) {
+    Big y=encode(Big(uint32_t(1)),q);
     while(e) { if(e&1) y=multiply(y,x,q); e>>=1; if(e) x=multiply(x,x,q); }
     return y;
 }
@@ -45,7 +58,8 @@ __global__ void make_tables(const uint32_t* qp,const uint32_t* roots,
                            uint32_t* twist,uint32_t* inv_twist,uint32_t* scale,unsigned n) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
-    const Big q(qp,0), psi(roots,0), invpsi(roots,1), invn(roots,2);
+    const Mod q(qp,0);
+    const Big psi=encode(Big(roots,0),q), invpsi=encode(Big(roots,1),q), invn=encode(Big(roots,2),q);
     auto a=pow_small(psi,i,q), b=pow_small(invpsi,i,q);
     a.store(twist,i); b.store(inv_twist,i); multiply(b,invn,q).store(scale,i);
 }
@@ -54,7 +68,8 @@ __global__ void prepare(const uint32_t* input,uint32_t* ab,const uint32_t* twist
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     unsigned poly=blockIdx.y, j=__brev(i)>>(32-logn);
-    const Big q(qp,0), x(input,poly*n+i), t(twist,i);
+    const Mod q(qp,0);
+    const Big x=encode(Big(input,poly*n+i),q), t(twist,i);
     multiply(x,t,q).store(ab,poly*n+j);
 }
 __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
@@ -62,7 +77,8 @@ __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
     unsigned k=blockIdx.x*blockDim.x+threadIdx.x;
     if(k>=n/2) return;
     unsigned j=k&(half-1), i=2*(k-j)+j+blockIdx.y*n;
-    const Big q(qp,0), u(values,i), v(values,i+half), tw(table,j*(n/half));
+    const Mod q(qp,0);
+    const Big u(values,i), v(values,i+half), tw(table,j*(n/half));
     auto t=multiply(v,tw,q);
     u.add_mod(t,q).store(values,i); u.sub_mod(t,q).store(values,i+half);
 }
@@ -70,14 +86,16 @@ __global__ void product(const uint32_t* ab,uint32_t* c,const uint32_t* qp,
                         unsigned n,unsigned logn) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
-    const Big q(qp,0), a(ab,i), b(ab,n+i);
+    const Mod q(qp,0);
+    const Big a(ab,i), b(ab,n+i);
     multiply(a,b,q).store(c,__brev(i)>>(32-logn));
 }
 __global__ void finish(uint32_t* c,const uint32_t* scale,const uint32_t* qp,unsigned n) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
-    const Big q(qp,0), x(c,i), s(scale,i);
-    multiply(x,s,q).store(c,i);
+    const Mod q(qp,0);
+    const Big x(c,i), s(scale,i);
+    decode(multiply(x,s,q),q).store(c,i);
 }
 } // namespace
 

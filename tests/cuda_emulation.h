@@ -46,6 +46,23 @@ struct EmulatedBig {
     bool operator>=(const EmulatedBig& b) const { return v>=b.v; }
     EmulatedBig mul_scalar(uint32_t b) const { return EmulatedBig(mpz_class((v*b)&mask())); }
     EmulatedWide mul_wide(const EmulatedBig& b) const;
+    static const mpz_class& rinv(const EmulatedBig& q) {
+        static mpz_class previous, inverse;
+        if(previous!=q.v) {
+            previous=q.v; mpz_class r=mpz_class(1)<<896;
+            mpz_invert(inverse.get_mpz_t(),r.get_mpz_t(),q.v.get_mpz_t());
+        }
+        return inverse;
+    }
+    EmulatedBig to_montgomery(const EmulatedBig& q) const {
+        return EmulatedBig(mpz_class((v<<896)%q.v));
+    }
+    EmulatedBig from_montgomery(const EmulatedBig& q) const {
+        return EmulatedBig(mpz_class(v*rinv(q)%q.v));
+    }
+    EmulatedBig mul_montgomery(const EmulatedBig& b,const EmulatedBig& q) const {
+        return EmulatedBig(mpz_class(v*b.v*rinv(q)%q.v));
+    }
     void store(uint32_t* p,unsigned i) const {
         std::memset(p+i*28,0,112); mpz_export(p+i*28,nullptr,-1,4,0,0,v.get_mpz_t());
     }
@@ -64,7 +81,7 @@ inline EmulatedWide EmulatedBig::mul_wide(const EmulatedBig& b) const {
     mpz_class p=v*b.v;
     return {EmulatedBig(mpz_class(p&mask())),EmulatedBig(mpz_class(p>>896))};
 }
-struct Descriptor { using bigint=EmulatedBig; };
+struct Descriptor { using bigint=EmulatedBig; using modulus=EmulatedBig; };
 template<unsigned W,unsigned S> Descriptor operator+(BitWidth<W>,SM<S>){return {};}
 inline Descriptor operator+(Descriptor,Thread){return {};}
 }
