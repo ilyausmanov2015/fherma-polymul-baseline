@@ -1,3 +1,6 @@
+#ifndef FHERMA_INPUT_WC
+#define FHERMA_INPUT_WC 1
+#endif
 #ifndef FHERMA_STREAM_OUTPUT
 #define FHERMA_STREAM_OUTPUT 0
 #endif
@@ -465,7 +468,11 @@ void* fherma_init(const fherma::Point& p) {
     if(!FHERMA_RNS_GROUPED) check(cudaMalloc(&s->input_soa,2*bytes),"allocate limb-plane inputs");
     check(cudaMalloc(&s->ab,size_t(2)*rns::PrimeCount*p.N*4),"allocate RNS operands");
     check(cudaMalloc(&s->c,size_t(rns::PrimeCount)*p.N*4),"allocate RNS inverse");
+#if defined(__CUDACC__) && FHERMA_INPUT_WC
+    check(cudaHostAlloc(reinterpret_cast<void**>(&s->host_input),2*bytes,cudaHostAllocWriteCombined),"write-combined RNS inputs");
+#else
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_input),2*bytes),"pinned RNS inputs");
+#endif
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_output),bytes),"pinned RNS output");
     std::memset(s->host_input,0,2*bytes);std::memset(s->host_output,0,bytes);
 #if FHERMA_PROFILE

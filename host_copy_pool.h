@@ -58,6 +58,10 @@ class HostCopyPool {
             const char* source=rank<Threads/2 ? job.a : job.b;
             char* dest=job.out+(rank<Threads/2 ? 0 : job.bytes);
             host_copy_bytes(dest+begin,source+begin,end-begin);
+#if FHERMA_INPUT_WC && defined(__x86_64__) && defined(__GNUC__)
+            // Also order short memcpy tails written to WC staging pages.
+            _mm_sfence();
+#endif
         } else {
             size_t begin=job.bytes*rank/Threads,end=job.bytes*(rank+1)/Threads;
 #if FHERMA_STREAM_OUTPUT
