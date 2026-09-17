@@ -32,6 +32,9 @@
 #ifndef FHERMA_MAIN_OUTPUT
 #define FHERMA_MAIN_OUTPUT 0
 #endif
+#ifndef FHERMA_FIRST_CPU
+#define FHERMA_FIRST_CPU 0
+#endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
@@ -154,6 +157,10 @@ public:
 #ifdef __linux__
         cpu_set_t allowed; int caller=sched_getcpu();
         if(caller>=0 && sched_getaffinity(0,sizeof(allowed),&allowed)==0) {
+#if FHERMA_FIRST_CPU
+            for(int cpu=0;cpu<CPU_SETSIZE;++cpu)
+                if(CPU_ISSET(cpu,&allowed)) { caller=cpu;break; }
+#endif
             unsigned found=0;
             for(int cpu=0;cpu<CPU_SETSIZE && found<Threads-1;++cpu)
                 if(cpu!=caller && CPU_ISSET(cpu,&allowed)) worker_cpus[found++]=cpu;

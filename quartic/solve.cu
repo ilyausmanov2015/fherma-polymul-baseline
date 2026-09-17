@@ -1,3 +1,6 @@
+#ifndef FHERMA_FIRST_CPU
+#define FHERMA_FIRST_CPU 1
+#endif
 #ifndef FHERMA_MAIN_OUTPUT
 #define FHERMA_MAIN_OUTPUT 1
 #endif
