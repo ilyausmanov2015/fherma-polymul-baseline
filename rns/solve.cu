@@ -1,3 +1,6 @@
+#ifndef FHERMA_TRANSFER_GRAPHS
+#define FHERMA_TRANSFER_GRAPHS 1
+#endif
 #ifndef FHERMA_CHUNK_GRAPHS
 #define FHERMA_CHUNK_GRAPHS 0
 #endif
@@ -37,10 +40,10 @@
 #define FHERMA_RNS_FUSED_TRANSPOSE 1
 #endif
 #ifndef FHERMA_PIPELINE_INPUT
-#define FHERMA_PIPELINE_INPUT 2
+#define FHERMA_PIPELINE_INPUT 4
 #endif
 #ifndef FHERMA_PIPELINE_OUTPUT
-#define FHERMA_PIPELINE_OUTPUT 2
+#define FHERMA_PIPELINE_OUTPUT 4
 #endif
 #ifndef FHERMA_RNS_RADIX4
 #define FHERMA_RNS_RADIX4 1
@@ -432,6 +435,7 @@ struct State {
     cudaStream_t input_streams[FHERMA_PIPELINE_INPUT]{};
     cudaEvent_t input_ready[FHERMA_PIPELINE_INPUT]{};
     cudaGraphExec_t prepare_graph[FHERMA_PIPELINE_INPUT]{};
+    cudaGraphExec_t transfer_graph[FHERMA_PIPELINE_INPUT]{};
 #if FHERMA_PIPELINE_OUTPUT>1
     cudaEvent_t output_ready[FHERMA_PIPELINE_OUTPUT]{};
 #endif
@@ -443,6 +447,7 @@ struct State {
 #if FHERMA_GRAPH
         if(graph) cudaGraphExecDestroy(graph);
         for(auto executable:prepare_graph) if(executable) cudaGraphExecDestroy(executable);
+        for(auto executable:transfer_graph) if(executable) cudaGraphExecDestroy(executable);
         if(stream) cudaStreamDestroy(stream);
         if(transfer_stream) cudaStreamDestroy(transfer_stream);
         for(auto input_stream:input_streams) if(input_stream) cudaStreamDestroy(input_stream);
@@ -646,10 +651,26 @@ void* fherma_init(const fherma::Point& p) {
 #if FHERMA_TENSOR_PREPARE
     if(p.N==32768) s->tensor.bind(s->stream);
 #endif
+    static_assert(!FHERMA_TRANSFER_GRAPHS || !FHERMA_CHUNK_GRAPHS,"transfer graphs use the shared DMA stream");
     if(s->overlap_input) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
+            if(FHERMA_TRANSFER_GRAPHS) {
+                size_t count=size_t(s->n)*AbiWords/FHERMA_PIPELINE_INPUT,begin=count*part;
+                check(cudaStreamBeginCapture(s->transfer_stream,cudaStreamCaptureModeGlobal),"capture RNS transfer chunk");
+                check(cudaMemcpyAsync(s->input+begin,s->host_input+2*begin,count*4,cudaMemcpyHostToDevice,s->transfer_stream),"capture RNS A transfer");
+                check(cudaMemcpyAsync(s->input+size_t(s->n)*AbiWords+begin,s->host_input+2*begin+count,count*4,cudaMemcpyHostToDevice,s->transfer_stream),"capture RNS B transfer");
+                check(cudaEventRecordWithFlags(s->input_ready[part],s->transfer_stream,cudaEventRecordExternal),"capture RNS input signal");
+                cudaGraph_t definition=nullptr;
+                check(cudaStreamEndCapture(s->transfer_stream,&definition),"finish RNS transfer capture");
+                auto status=cudaGraphInstantiateWithFlags(&s->transfer_graph[part],definition,0);
+                cudaGraphDestroy(definition);check(status,"instantiate RNS transfer graph");
+                check(cudaGraphUpload(s->transfer_graph[part],s->transfer_stream),"upload RNS transfer graph");
+                check(cudaStreamSynchronize(s->transfer_stream),"RNS transfer graph ready");
+            }
             auto capture_stream=FHERMA_CHUNK_GRAPHS ? s->input_streams[part] : s->stream;
             check(cudaStreamBeginCapture(capture_stream,cudaStreamCaptureModeGlobal),"capture RNS input chunk");
+            if(FHERMA_TRANSFER_GRAPHS)
+                check(cudaStreamWaitEvent(capture_stream,s->input_ready[part],cudaEventWaitExternal),"capture RNS input dependency");
             if(FHERMA_CHUNK_GRAPHS) {
                 size_t count=size_t(s->n)*AbiWords/FHERMA_PIPELINE_INPUT,begin=count*part;
                 check(cudaMemcpyAsync(s->input+begin,s->host_input+2*begin,count*4,cudaMemcpyHostToDevice,capture_stream),"capture RNS chunk A upload");
@@ -697,6 +718,12 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     unsigned input_part=0;
     copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,input.a.data.data(),input.b.data.data(),words,
         [&](size_t begin,const uint32_t* a,const uint32_t* b,size_t count) {
+            if(FHERMA_TRANSFER_GRAPHS && s.overlap_input) {
+                check(cudaGraphLaunch(s.transfer_graph[input_part],s.transfer_stream),"execute RNS transfer graph");
+                check(cudaGraphLaunch(s.prepare_graph[input_part],s.stream),"execute RNS dependent prepare graph");
+                ++input_part;
+                return;
+            }
             if(FHERMA_CHUNK_GRAPHS && s.overlap_input) {
                 auto input_stream=s.input_streams[input_part];
                 check(cudaGraphLaunch(s.prepare_graph[input_part],input_stream),"execute upload and prepare graph");
