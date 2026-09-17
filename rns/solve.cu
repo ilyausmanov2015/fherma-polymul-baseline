@@ -1,0 +1,269 @@
+#ifndef FHERMA_GRAPH
+#define FHERMA_GRAPH 1
+#endif
+#ifndef FHERMA_COPY_THREADS
+#define FHERMA_COPY_THREADS 8
+#endif
+#ifndef FHERMA_SPIN_COPY
+#define FHERMA_SPIN_COPY 1
+#endif
+#ifndef FHERMA_STREAM_COPY
+#define FHERMA_STREAM_COPY 1
+#endif
+#include "fherma.h"
+#include "rns/host_setup.h"
+#include <cupqc/bigint.hpp>
+#include <cuda_runtime.h>
+#include "host_affinity.h"
+#include "host_copy_pool.h"
+#include <memory>
+#include <cstring>
+
+namespace {
+using namespace rns;
+using WideBI=decltype(cupqc::BitWidth<WideWords*32>()+cupqc::SM<800>()+cupqc::Thread());
+using AbiBI=decltype(cupqc::BitWidth<AbiWords*32>()+cupqc::SM<800>()+cupqc::Thread());
+using Wide=typename WideBI::bigint;
+using Big=typename AbiBI::bigint;
+__device__ uint32_t add_mod(uint32_t a,uint32_t b,uint32_t p) {
+    uint32_t sum=a+b;return sum>=p ? sum-p : sum;
+}
+__device__ uint32_t sub_mod(uint32_t a,uint32_t b,uint32_t p) {
+    uint32_t difference=a-b;return a<b ? difference+p : difference;
+}
+__device__ uint32_t shoup(uint32_t a,Twiddle w,uint32_t p) {
+    uint32_t quotient=__umulhi(a,w.shoup);
+    uint32_t result=a*w.value-quotient*p;
+    return result>=p ? result-p : result;
+}
+__device__ uint32_t multiply_mod(uint32_t a,uint32_t b,const SmallMod& modulus) {
+    uint64_t product=uint64_t(a)*b;
+    uint64_t quotient=__umul64hi(product,modulus.reciprocal);
+    uint32_t result=uint32_t(product-quotient*modulus.p);
+    return result>=modulus.p ? result-modulus.p : result;
+}
+__global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
+                             const Twiddle* twists,unsigned n,unsigned logn) {
+    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=n) return;
+    unsigned prime_i=blockIdx.y%PrimeCount,poly=blockIdx.y/PrimeCount;
+    SmallMod modulus=mods[prime_i];
+    const uint32_t* coefficient=input+(poly*n+i)*AbiWords;
+    uint32_t value=0;
+    Twiddle base{modulus.base,modulus.base_shoup};
+    #pragma unroll
+    for(int limb=AbiWords-1;limb>=0;--limb) {
+        uint32_t word=coefficient[limb];
+        if(word>=modulus.p) word-=modulus.p;
+        if(word>=modulus.p) word-=modulus.p;
+        value=add_mod(shoup(value,base,modulus.p),word,modulus.p);
+    }
+    value=shoup(value,twists[prime_i*n+i],modulus.p);
+    ab[blockIdx.y*n+(__brev(i)>>(32-logn))]=value;
+}
+__global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
+    __shared__ uint32_t tile[Tile];
+    unsigned t=threadIdx.x,prime_i=blockIdx.y%PrimeCount;
+    values+=blockIdx.y*n+blockIdx.x*Tile;
+    tables+=prime_i*Tile;
+    uint32_t p=mods[prime_i].p;
+    tile[t]=values[t];tile[t+Tile/2]=values[t+Tile/2];
+    __syncthreads();
+    unsigned stride=Tile;
+    for(unsigned half=1;half<Tile;half*=2,stride>>=1) {
+        unsigned j=t&(half-1),i=2*(t-j)+j;
+        uint32_t u=tile[i],v=shoup(tile[i+half],tables[j*stride],p);
+        tile[i]=add_mod(u,v,p);tile[i+half]=sub_mod(u,v,p);
+        __syncthreads();
+    }
+    values[t]=tile[t];values[t+Tile/2]=tile[t+Tile/2];
+}
+__global__ void stage_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,
+                           unsigned n,unsigned half,unsigned stride) {
+    unsigned k=blockIdx.x*blockDim.x+threadIdx.x;
+    if(k>=n/2) return;
+    unsigned prime_i=blockIdx.y%PrimeCount,j=k&(half-1),i=2*(k-j)+j;
+    uint32_t p=mods[prime_i].p;
+    values+=blockIdx.y*n;
+    uint32_t u=values[i],v=shoup(values[i+half],tables[prime_i*n+j*stride],p);
+    values[i]=add_mod(u,v,p);values[i+half]=sub_mod(u,v,p);
+}
+__global__ void product_rns(const uint32_t* ab,uint32_t* c,const SmallMod* mods,unsigned n,unsigned logn) {
+    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=n) return;
+    unsigned prime_i=blockIdx.y;
+    uint32_t a=ab[prime_i*n+i],b=ab[(PrimeCount+prime_i)*n+i];
+    c[prime_i*n+(__brev(i)>>(32-logn))]=multiply_mod(a,b,mods[prime_i]);
+}
+// A CRT representative has up to 1767 bits. Its first fold needs 29 words,
+// unlike the narrower product used by the original 868-bit NTT solution.
+__device__ Big fold_crt(const Wide& value,const Big& q) {
+    uint32_t c=uint32_t(0)-q[0],folded[29];uint64_t carry=0;
+    #pragma unroll
+    for(unsigned k=0;k<29;++k) {
+        uint32_t high=(value[k+27]>>4)|((k<28 ? uint32_t(value[k+28]) : 0u)<<28);
+        uint32_t low=k<27 ? uint32_t(value[k]) : (k==27 ? (uint32_t(value[k])&15u) : 0u);
+        uint64_t v=uint64_t(high)*c+low+carry;
+        folded[k]=uint32_t(v);carry=v>>32;
+    }
+    uint32_t high0=(folded[27]>>4)|(folded[28]<<28),high1=folded[28]>>4;
+    folded[27]&=15u;carry=0;
+    Big result(uint32_t(0));
+    #pragma unroll
+    for(unsigned k=0;k<AbiWords;++k) {
+        uint64_t addition=k==0 ? uint64_t(high0)*c : (k==1 ? uint64_t(high1)*c : 0);
+        uint64_t v=uint64_t(folded[k])+addition+carry;
+        result[k]=uint32_t(v);carry=v>>32;
+    }
+    if(result>=q) result=result-q;
+    return result;
+}
+__global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const SmallMod* mods,
+                                const Twiddle* scales,const uint32_t* bases,const uint32_t* product,
+                                const uint32_t* half_ceil,const uint32_t* q_words,const uint32_t* product_mod_q,
+                                unsigned n) {
+    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=n) return;
+    Wide accumulator(uint32_t(0));
+    uint64_t fraction=0;uint32_t alpha=0;
+    #pragma unroll 1
+    for(unsigned prime_i=0;prime_i<PrimeCount;++prime_i) {
+        SmallMod modulus=mods[prime_i];
+        // The scale already contains inverse(P/pi mod pi).
+        uint32_t t=shoup(residues[prime_i*n+i],scales[prime_i*n+i],modulus.p);
+        uint64_t term=uint64_t(t)*modulus.reciprocal,next=fraction+term;
+        alpha+=next<fraction;fraction=next;
+        accumulator=accumulator+Wide(bases,prime_i).mul_scalar(t);
+    }
+    const Wide P(product,0);
+    Wide canonical=accumulator-P.mul_scalar(alpha);
+    if(canonical>=P) canonical=canonical-P;
+    bool negative=canonical>=Wide(half_ceil,0);
+    const Big q(q_words,0);
+    Big answer=fold_crt(canonical,q);
+    if(negative) answer=answer.sub_mod(Big(product_mod_q,0),q);
+    answer.store(output,i);
+}
+void check(cudaError_t status,const char* operation) {
+    if(status!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(status));
+}
+struct State {
+    HostCopyPool copy;
+    unsigned n=0,logn=0;
+    uint32_t *input=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*product=nullptr,*half_ceil=nullptr;
+    uint32_t *q=nullptr,*product_mod_q=nullptr,*host_input=nullptr,*host_output=nullptr;
+    SmallMod* mods=nullptr;
+    Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr;
+#if FHERMA_GRAPH
+    cudaStream_t stream=nullptr;cudaGraphExec_t graph=nullptr;
+#endif
+    ~State() {
+#if FHERMA_GRAPH
+        if(graph) cudaGraphExecDestroy(graph);
+        if(stream) cudaStreamDestroy(stream);
+#endif
+        cudaFree(input);cudaFree(ab);cudaFree(c);cudaFree(bases);cudaFree(product);cudaFree(half_ceil);
+        cudaFree(q);cudaFree(product_mod_q);cudaFree(mods);cudaFree(forward);cudaFree(inverse);
+        cudaFree(scale);cudaFree(small_forward);cudaFree(small_inverse);
+        cudaFreeHost(host_input);cudaFreeHost(host_output);
+    }
+};
+template<class T> void upload(T*& destination,const std::vector<T>& source) {
+    if(source.empty()) return;
+    check(cudaMalloc(&destination,source.size()*sizeof(T)),"allocate parameter table");
+    check(cudaMemcpy(destination,source.data(),source.size()*sizeof(T),cudaMemcpyHostToDevice),"upload parameter table");
+}
+void launch_rns(State& s,cudaStream_t stream=nullptr) {
+    dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
+    prepare_rns<<<full,128,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.n,s.logn);
+    unsigned first=1;
+    if(s.n>=Tile) {
+        dim3 tiles(s.n/Tile,2*PrimeCount);
+        small_rns<<<tiles,Tile/2,0,stream>>>(s.ab,s.mods,s.small_forward,s.n);
+        first=Tile;
+    }
+    for(unsigned h=first;h<s.n;h*=2)
+        stage_rns<<<half,128,0,stream>>>(s.ab,s.mods,s.forward,s.n,h,s.n/h);
+    dim3 inverse_full(full.x,PrimeCount),inverse_half(half.x,PrimeCount);
+    product_rns<<<inverse_full,128,0,stream>>>(s.ab,s.c,s.mods,s.n,s.logn);
+    if(s.n>=Tile) {
+        dim3 tiles(s.n/Tile,PrimeCount);
+        small_rns<<<tiles,Tile/2,0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
+    }
+    for(unsigned h=first;h<s.n;h*=2)
+        stage_rns<<<inverse_half,128,0,stream>>>(s.c,s.mods,s.inverse,s.n,h,s.n/h);
+    reconstruct_rns<<<full.x,128,0,stream>>>(s.c,s.input,s.mods,s.scale,s.bases,s.product,
+                                            s.half_ceil,s.q,s.product_mod_q,s.n);
+    check(cudaGetLastError(),"RNS kernels");
+}
+} // namespace
+
+void* fherma_init(const fherma::Point& p) {
+    if(p.N<2 || (p.N&(p.N-1)) || p.N>32768 || p.W!=868 || p.L!=rns::AbiWords || p.q.data.size()!=rns::AbiWords)
+        throw std::runtime_error("RNS coverage: power-of-two 2<=N<=32768, W=868, L=28");
+    uint32_t delta=uint32_t(0)-p.q.data[0];
+    bool special=delta>0 && delta<0x10000000u && p.q.data[27]==15u;
+    for(unsigned k=1;k<27;++k) special=special && p.q.data[k]==0xffffffffu;
+    if(!special) throw std::runtime_error("RNS coverage: q=2^868-c, c<2^28");
+    pin_near_gpu();
+    auto s=std::make_unique<State>();s->n=p.N;s->logn=__builtin_ctz(p.N);
+    auto constants=rns::setup(p.N,p.q.data);
+    upload(s->mods,constants.mods);upload(s->bases,constants.bases);upload(s->product,constants.product);
+    upload(s->half_ceil,constants.half_ceil);upload(s->product_mod_q,constants.product_mod_q);upload(s->q,p.q.data);
+    upload(s->forward,constants.forward);upload(s->inverse,constants.inverse);upload(s->scale,constants.scale);
+    upload(s->small_forward,constants.small_forward);upload(s->small_inverse,constants.small_inverse);
+    size_t bytes=size_t(p.N)*rns::AbiWords*4;
+    check(cudaMalloc(&s->input,2*bytes),"allocate ABI buffers");
+    check(cudaMalloc(&s->ab,size_t(2)*rns::PrimeCount*p.N*4),"allocate RNS operands");
+    check(cudaMalloc(&s->c,size_t(rns::PrimeCount)*p.N*4),"allocate RNS inverse");
+    check(cudaMallocHost(reinterpret_cast<void**>(&s->host_input),2*bytes),"pinned RNS inputs");
+    check(cudaMallocHost(reinterpret_cast<void**>(&s->host_output),bytes),"pinned RNS output");
+    std::memset(s->host_input,0,2*bytes);std::memset(s->host_output,0,bytes);
+#if FHERMA_GRAPH
+    check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
+    check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS graph");
+    check(cudaMemcpyAsync(s->input,s->host_input,2*bytes,cudaMemcpyHostToDevice,s->stream),"capture RNS H2D");
+    launch_rns(*s,s->stream);
+    check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture RNS D2H");
+    cudaGraph_t definition=nullptr;
+    check(cudaStreamEndCapture(s->stream,&definition),"finish RNS capture");
+    auto status=cudaGraphInstantiateWithFlags(&s->graph,definition,0);
+    cudaGraphDestroy(definition);check(status,"instantiate RNS graph");
+    check(cudaGraphUpload(s->graph,s->stream),"upload RNS graph");
+    check(cudaStreamSynchronize(s->stream),"RNS graph ready");
+#endif
+    return s.release();
+}
+fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
+    auto& s=*static_cast<State*>(opaque);
+    size_t words=size_t(s.n)*rns::AbiWords,bytes=words*4;
+    if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
+    s.copy.inputs(s.host_input,input.a.data.data(),input.b.data.data(),bytes);
+    fherma::Outputs output;output.c.shape={s.n,rns::AbiWords};
+    try {
+#if FHERMA_GRAPH
+        check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
+#else
+        check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"RNS H2D");
+        launch_rns(s);
+#endif
+        output.c.data.reserve(words);
+        s.copy.prefault(output.c.data.data(),bytes);
+        output.c.data.resize(words);
+#if FHERMA_GRAPH
+        check(cudaStreamSynchronize(s.stream),"RNS output ready");
+#else
+        check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"RNS D2H");
+#endif
+    } catch(...) {
+#if FHERMA_GRAPH
+        cudaStreamSynchronize(s.stream);
+#else
+        cudaDeviceSynchronize();
+#endif
+        throw;
+    }
+    s.copy.output(output.c.data.data(),s.host_output,bytes);
+    return output;
+}
+void fherma_free(void* state) { delete static_cast<State*>(state); }

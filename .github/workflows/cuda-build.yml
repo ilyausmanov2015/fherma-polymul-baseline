@@ -6,7 +6,7 @@ on:
         description: Compile variant
         type: choice
         default: default
-        options: [default, warp4, warp8]
+        options: [default, warp4, warp8, rns]
 
 permissions:
   contents: read
@@ -47,9 +47,11 @@ jobs:
           COMPILE_VARIANT: ${{ inputs.variant }}
         run: |
           defs=""
+          solver="wide"
           case "$COMPILE_VARIANT" in
             warp4) defs="-DFHERMA_MONTGOMERY=1 -DFHERMA_SOA=0 -DFHERMA_TPI=4 -DFHERMA_FUSED_TAIL=0" ;;
             warp8) defs="-DFHERMA_MONTGOMERY=1 -DFHERMA_SOA=0 -DFHERMA_TPI=8 -DFHERMA_FUSED_TAIL=0" ;;
+            rns) solver="rns" ;;
           esac
-          cmake -B build -DFHERMA_CUDA_ARCH=sm_120 -DFHERMA_RESOURCE_REPORT=ON "-DCMAKE_CUDA_FLAGS=$defs"
+          cmake -B build "-DFHERMA_SOLVER=$solver" -DFHERMA_CUDA_ARCH=sm_120 -DFHERMA_RESOURCE_REPORT=ON "-DCMAKE_CUDA_FLAGS=$defs"
           cmake --build build -j2

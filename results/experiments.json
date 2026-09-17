@@ -1657,5 +1657,134 @@
     "host_graph_us": [],
     "host_alloc_us": [],
     "host_staged_us": []
+  },
+  {
+    "id": "6aabda07b615118421bf7bf3",
+    "status": "finished",
+    "cases": 20,
+    "passed": 20,
+    "failure": null,
+    "init_s": 0.476968715,
+    "started_at": "2026-09-17T12:16:08.146Z",
+    "finished_at": "2026-09-17T12:18:45.663Z",
+    "commit": "c3b9340b28232df275aa220994b57dabc7625fbb",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 20,
+        "seeds": 20,
+        "seconds": {
+          "min": 0.00074868,
+          "median": 0.0007843825,
+          "mean": 0.0007899008499999999,
+          "max": 0.000843447
+        }
+      }
+    ],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": []
+  },
+  {
+    "id": "6aabdaf7b615118421bf7c79",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.454343094,
+    "started_at": "2026-09-17T12:20:11.193Z",
+    "finished_at": "2026-09-17T12:21:47.122Z",
+    "commit": "faf56c8250798b76a062439a37dc0c897f66af9a",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.00082667,
+          "median": 0.000849687,
+          "mean": 0.0009415483333333332,
+          "max": 0.001148288
+        }
+      }
+    ],
+    "profiles_us": [
+      {
+        "h2d": 427.04,
+        "prepare": 75.072,
+        "forward": 218.144,
+        "product": 33.76,
+        "inverse": 81.6,
+        "finish": 21.824,
+        "d2h": 678.08
+      },
+      {
+        "h2d": 294.336,
+        "prepare": 36.48,
+        "forward": 104.48,
+        "product": 28.64,
+        "inverse": 75.808,
+        "finish": 20.448,
+        "d2h": 287.872
+      },
+      {
+        "h2d": 295.392,
+        "prepare": 35.392,
+        "forward": 106.496,
+        "product": 28.672,
+        "inverse": 79.872,
+        "finish": 20.48,
+        "d2h": 241.696
+      },
+      {
+        "h2d": 281.92,
+        "prepare": 35.104,
+        "forward": 104.48,
+        "product": 28.64,
+        "inverse": 77.856,
+        "finish": 20.448,
+        "d2h": 569.056
+      },
+      {
+        "h2d": 287.968,
+        "prepare": 33.6,
+        "forward": 104.448,
+        "product": 28.672,
+        "inverse": 79.872,
+        "finish": 20.48,
+        "d2h": 229.408
+      }
+    ],
+    "host_us": [
+      {
+        "pack": 272.648,
+        "unpack": 142.534
+      },
+      {
+        "pack": 146.715,
+        "unpack": 165.434
+      },
+      {
+        "pack": 139.927,
+        "unpack": 155.709
+      },
+      {
+        "pack": 135.889,
+        "unpack": 132.878
+      },
+      {
+        "pack": 129.103,
+        "unpack": 144.276
+      }
+    ],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": []
   }
 ]

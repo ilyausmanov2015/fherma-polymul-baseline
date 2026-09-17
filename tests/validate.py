@@ -76,7 +76,7 @@ def make(n):
     (work/'labels.json').write_text(json.dumps(labels))
     return work
 
-def verify(work):
+def verify(work,source):
     labels=json.loads((work/'labels.json').read_text())
     results=json.loads((work/'out'/'results.json').read_text())
     verdicts=[]
@@ -88,7 +88,8 @@ def verify(work):
         print(label, 'PASS' if passed else 'FAIL', result,flush=True)
     report={'kind':'local-independent-oracle','point':json.loads((work/'manifest.json').read_text())['point'],
             'passed':all(v['passed'] for v in verdicts),'verdicts':verdicts,
-            'source_sha256':hashlib.sha256((ROOT/'solve.cu').read_bytes()).hexdigest(),
+            'source':str(source.relative_to(ROOT)),
+            'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
             'median_seconds':statistics.median(v['seconds'] for v in verdicts if v['seconds'] is not None),
             'init_seconds':results['init_s']}
     (work/'validation.json').write_text(json.dumps(report,indent=2))
@@ -99,8 +100,9 @@ if __name__=='__main__':
     p=argparse.ArgumentParser(); p.add_argument('--n',type=int,default=32)
     p.add_argument('--binary',type=Path); p.add_argument('--verify-only',action='store_true')
     p.add_argument('--existing',action='store_true',help='reuse existing generated cases')
+    p.add_argument('--source',default='solve.cu',help='source used to build the checked binary')
     args=p.parse_args(); work=ROOT/'local'/f'n{args.n}-w868'
     if not args.verify_only:
         if not args.existing: work=make(args.n)
         if args.binary: subprocess.run([str(args.binary.resolve()),str(work)],check=True,timeout=600)
-    if args.verify_only or args.binary: verify(work)
+    if args.verify_only or args.binary: verify(work,(ROOT/args.source).resolve())

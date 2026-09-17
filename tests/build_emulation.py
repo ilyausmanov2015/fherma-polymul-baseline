@@ -5,12 +5,14 @@ import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / 'build-emulation'
-BUILD.mkdir(exist_ok=True)
 parser = argparse.ArgumentParser()
 parser.add_argument('--define',action='append',default=[])
+parser.add_argument('--source',default='solve.cu')
 args = parser.parse_args()
-source = (ROOT / 'solve.cu').read_text()
+source_path=ROOT/args.source
+BUILD=ROOT/('build-emulation-rns' if args.source=='rns/solve.cu' else 'build-emulation')
+BUILD.mkdir(exist_ok=True)
+source = source_path.read_text()
 source = source.replace('#include <cupqc/bigint.hpp>', '#include "tests/cuda_emulation.h"')
 source = source.replace('#include <cuda_runtime.h>', '')
 # Device launch bounds constrain register allocation only; the CPU adapter
@@ -34,7 +36,8 @@ for m in reversed(matches):
 source, count = re.subn(
     r'(\w+)<<<([^,<>]+),\s*([^<>]+)>>>\(([^;]+)\);',
     lambda m: 'emulate_launch('+m[2]+','+m[3].split(',')[0]+',[&] { return '+m[1]+'('+m[4]+'); });', source)
-assert count == 14, f'Expected 14 CUDA launch sites, saw {count}; update test adapter explicitly.'
+expected=7 if args.source=='rns/solve.cu' else 14
+assert count == expected, f'Expected {expected} CUDA launch sites, saw {count}; update test adapter explicitly.'
 assert '<<<' not in source
 (BUILD / 'solve_emulated.cpp').write_text(source)
 cmd = ['clang++', '-std=c++20', '-O2', '-Wall', '-Wextra', '-I'+str(ROOT),
