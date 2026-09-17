@@ -4,7 +4,7 @@
 #include <iostream>
 int main() {
     std::vector<uint32_t> q(rns::AbiWords,0xffffffffu);q[0]=uint32_t(0)-11993087;q.back()=15;
-    auto setup=rns::setup(2,q);auto weights=rns_tensor::make_weights(setup.mods);
+    auto setup=rns::setup(32768,q);auto weights=rns_tensor::make_weights(setup.mods);
     std::mt19937 random(619047);
     unsigned checked=0;
     for(unsigned trial=0;trial<1024;++trial) {
