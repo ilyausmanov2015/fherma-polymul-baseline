@@ -5,21 +5,52 @@
 #include <gmpxx.h>
 #include <cstdlib>
 #include <cstring>
+#include <coroutine>
+#include <exception>
+#include <vector>
 #ifndef FHERMA_TPI
 #define FHERMA_TPI 1
 #endif
 #define __global__
 #define __device__
+#define __shared__ static
 struct dim3 { unsigned x,y,z; dim3(unsigned x_=1,unsigned y_=1,unsigned z_=1):x(x_),y(y_),z(z_){} };
 inline dim3 blockIdx,blockDim,threadIdx;
 inline unsigned __brev(unsigned x) {
     unsigned y=0; for(unsigned i=0;i<32;++i) { y=(y<<1)|(x&1); x>>=1; } return y;
 }
+struct EmulatedKernel {
+    struct promise_type {
+        std::exception_ptr failure;
+        EmulatedKernel get_return_object() { return {std::coroutine_handle<promise_type>::from_promise(*this)}; }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        void return_void() {}
+        void unhandled_exception() { failure=std::current_exception(); }
+    };
+    std::coroutine_handle<promise_type> handle;
+    EmulatedKernel(std::coroutine_handle<promise_type> h):handle(h){}
+    EmulatedKernel(EmulatedKernel&& other):handle(other.handle) { other.handle=nullptr; }
+    ~EmulatedKernel() { if(handle) handle.destroy(); }
+};
 template<class F> void emulate_launch(dim3 grid,dim3 threads,F f) {
     blockDim=threads;
     for(blockIdx.y=0;blockIdx.y<grid.y;++blockIdx.y)
-        for(blockIdx.x=0;blockIdx.x<grid.x;++blockIdx.x)
-            for(threadIdx.x=0;threadIdx.x<threads.x;threadIdx.x+=FHERMA_TPI) f();
+        for(blockIdx.x=0;blockIdx.x<grid.x;++blockIdx.x) {
+            std::vector<EmulatedKernel> tasks;
+            for(threadIdx.x=0;threadIdx.x<threads.x;threadIdx.x+=FHERMA_TPI) tasks.push_back(f());
+            unsigned active=tasks.size();
+            while(active) {
+                for(unsigned t=0;t<tasks.size();++t) {
+                    auto h=tasks[t].handle;
+                    if(h.done()) continue;
+                    threadIdx.x=t*FHERMA_TPI;
+                    h.resume();
+                    if(h.promise().failure) std::rethrow_exception(h.promise().failure);
+                    if(h.done()) --active;
+                }
+            }
+        }
 }
 using cudaError_t=int;
 constexpr int cudaSuccess=0,cudaMemcpyHostToDevice=1,cudaMemcpyDeviceToHost=2;

@@ -8,7 +8,7 @@ rows=[]
 for path in (ROOT/'local').glob('run-*.json'):
     payload=json.loads(path.read_text())
     run=payload.get('run',payload)
-    if run.get('status') not in ['finished','failed','error']:
+    if run.get('status') not in ['finished','failed','error','aborted','expired']:
         continue
     row={k:run.get(k) for k in ['id','status','cases','passed','failure','init_s','started_at','finished_at']}
     row['commit']=payload.get('submission',{}).get('commit')

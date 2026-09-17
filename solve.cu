@@ -14,6 +14,9 @@
 #ifndef FHERMA_PINNED
 #define FHERMA_PINNED 1
 #endif
+#ifndef FHERMA_FUSED_SMALL
+#define FHERMA_FUSED_SMALL 1
+#endif
 
 // Exact negacyclic NTT baseline. All device modular arithmetic uses cuPQC.
 #include "fherma.h"
@@ -153,6 +156,28 @@ __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
     auto t=multiply(v,tw,q);
     store_coeff(u.add_mod(t,q),values,i,n); store_coeff(u.sub_mod(t,q),values,i+half,n);
 }
+// Keep the first eight radix-2 stages in shared memory. Every block handles
+// an independent contiguous tile; no inter-block synchronization is needed.
+__global__ void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsigned n) {
+    __shared__ uint32_t tile[256*L];
+    unsigned t=threadIdx.x/FHERMA_TPI, base=blockIdx.x*256;
+    values+=blockIdx.y*n*L;
+    const Mod q(qp,0);
+    store_coeff(load_coeff(values,base+2*t,n),tile,2*t,256);
+    store_coeff(load_coeff(values,base+2*t+1,n),tile,2*t+1,256);
+    __syncthreads();
+    for(unsigned half=1;half<256;half*=2) {
+        unsigned j=t&(half-1), i=2*(t-j)+j;
+        const Big u=load_coeff(tile,i,256), v=load_coeff(tile,i+half,256);
+        const Big tw=load_coeff(table,j*(n/half),n);
+        const Big m=multiply(v,tw,q);
+        store_coeff(u.add_mod(m,q),tile,i,256);
+        store_coeff(u.sub_mod(m,q),tile,i+half,256);
+        __syncthreads();
+    }
+    store_coeff(load_coeff(tile,2*t,256),values,base+2*t,n);
+    store_coeff(load_coeff(tile,2*t+1,256),values,base+2*t+1,n);
+}
 __global__ void product(const uint32_t* ab,uint32_t* c,const uint32_t* qp,
                         unsigned n,unsigned logn) {
     unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
@@ -218,11 +243,21 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     dim3 full((s.n*FHERMA_TPI+127)/128,2), halves((s.n/2*FHERMA_TPI+127)/128,2);
     prepare<<<full,128>>>(s.input,s.ab,s.twist,s.q,s.n,s.logn);
     mark(s,2);
-    for(unsigned half=1;half<s.n;half*=2) stage<<<halves,128>>>(s.ab,s.twist,s.q,s.n,half);
+    unsigned first=1;
+    if(FHERMA_FUSED_SMALL && s.n>=256) {
+        dim3 tiles(s.n/256,2);
+        small_stages<<<tiles,128*FHERMA_TPI>>>(s.ab,s.twist,s.q,s.n);
+        first=256;
+    }
+    for(unsigned half=first;half<s.n;half*=2) stage<<<halves,128>>>(s.ab,s.twist,s.q,s.n,half);
     mark(s,3);
     product<<<full.x,128>>>(s.ab,s.c,s.q,s.n,s.logn);
     mark(s,4);
-    for(unsigned half=1;half<s.n;half*=2) stage<<<halves.x,128>>>(s.c,s.inv_twist,s.q,s.n,half);
+    if(FHERMA_FUSED_SMALL && s.n>=256) {
+        unsigned tiles=s.n/256;
+        small_stages<<<tiles,128*FHERMA_TPI>>>(s.c,s.inv_twist,s.q,s.n);
+    }
+    for(unsigned half=first;half<s.n;half*=2) stage<<<halves.x,128>>>(s.c,s.inv_twist,s.q,s.n,half);
     mark(s,5);
     finish<<<full.x,128>>>(s.c,s.input,s.scale,s.q,s.n);
     mark(s,6);

@@ -46,7 +46,7 @@ def main():
                 if line != last:
                     print(line, flush=True)
                     last = line
-                done = run.get('status') in ['finished','failed','cancelled','error']
+                done = run.get('status') in ['finished','failed','cancelled','error','aborted','expired']
             if not args.wait or done:
                 return
             time.sleep(20)
