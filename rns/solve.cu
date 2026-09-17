@@ -1,8 +1,11 @@
+#ifndef FHERMA_CHUNK_GRAPHS
+#define FHERMA_CHUNK_GRAPHS 1
+#endif
 #ifndef FHERMA_LIBRARY_NTT
 #define FHERMA_LIBRARY_NTT 0
 #endif
 #ifndef FHERMA_TENSOR_PREPARE
-#define FHERMA_TENSOR_PREPARE 1
+#define FHERMA_TENSOR_PREPARE 0
 #endif
 #ifndef __CUDACC__
 // The CPU adapter cannot execute cuPQC's device-LTO NTT. It only validates
@@ -423,6 +426,7 @@ struct State {
 #if FHERMA_GRAPH
     cudaStream_t stream=nullptr;cudaGraphExec_t graph=nullptr;
     cudaStream_t transfer_stream=nullptr;
+    cudaStream_t input_streams[FHERMA_PIPELINE_INPUT]{};
     cudaEvent_t input_ready[FHERMA_PIPELINE_INPUT]{};
     cudaGraphExec_t prepare_graph[FHERMA_PIPELINE_INPUT]{};
 #if FHERMA_PIPELINE_OUTPUT>1
@@ -438,6 +442,7 @@ struct State {
         for(auto executable:prepare_graph) if(executable) cudaGraphExecDestroy(executable);
         if(stream) cudaStreamDestroy(stream);
         if(transfer_stream) cudaStreamDestroy(transfer_stream);
+        for(auto input_stream:input_streams) if(input_stream) cudaStreamDestroy(input_stream);
         for(auto event:input_ready) if(event) cudaEventDestroy(event);
 #if FHERMA_PIPELINE_OUTPUT>1
         for(auto event:output_ready) if(event) cudaEventDestroy(event);
@@ -574,6 +579,7 @@ void* fherma_init(const fherma::Point& p) {
     s->overlap_input=FHERMA_OVERLAP_PREPARE && FHERMA_PIPELINE_INPUT>1 && FHERMA_RNS_TAIL && p.N==32768;
     static_assert(!FHERMA_OVERLAP_PREPARE || (!FHERMA_PROFILE && !FHERMA_RNS_GROUPED),"chunk prepare uses SoA without diagnostic events");
     static_assert(FHERMA_PIPELINE_INPUT>0 && (32768%FHERMA_PIPELINE_INPUT)==0,"input chunks must contain whole coefficients");
+    static_assert(!(FHERMA_CHUNK_GRAPHS && FHERMA_TENSOR_PREPARE),"concurrent cuBLAS graphs would require separate workspaces");
     auto constants=rns::setup(p.N,p.q.data);
 #if FHERMA_TENSOR_PREPARE
     static_assert(FHERMA_OVERLAP_PREPARE,"tensor preparation currently uses the chunk pipeline");
@@ -624,7 +630,10 @@ void* fherma_init(const fherma::Point& p) {
 #endif
 #if FHERMA_GRAPH
     if(s->overlap_input) {
-        check(cudaStreamCreateWithFlags(&s->transfer_stream,cudaStreamNonBlocking),"RNS input transfer stream");
+        if(FHERMA_CHUNK_GRAPHS) {
+            for(auto& input_stream:s->input_streams)
+                check(cudaStreamCreateWithFlags(&input_stream,cudaStreamNonBlocking),"RNS independent input stream");
+        } else check(cudaStreamCreateWithFlags(&s->transfer_stream,cudaStreamNonBlocking),"RNS input transfer stream");
         for(auto& event:s->input_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"RNS input segment event");
     }
 #if FHERMA_PIPELINE_OUTPUT>1
@@ -636,13 +645,20 @@ void* fherma_init(const fherma::Point& p) {
 #endif
     if(s->overlap_input) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
-            check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS input chunk");
-            launch_input_chunk(*s,s->n*part/FHERMA_PIPELINE_INPUT,s->n/FHERMA_PIPELINE_INPUT,s->stream);
+            auto capture_stream=FHERMA_CHUNK_GRAPHS ? s->input_streams[part] : s->stream;
+            check(cudaStreamBeginCapture(capture_stream,cudaStreamCaptureModeGlobal),"capture RNS input chunk");
+            if(FHERMA_CHUNK_GRAPHS) {
+                size_t count=size_t(s->n)*AbiWords/FHERMA_PIPELINE_INPUT,begin=count*part;
+                check(cudaMemcpyAsync(s->input+begin,s->host_input+2*begin,count*4,cudaMemcpyHostToDevice,capture_stream),"capture RNS chunk A upload");
+                check(cudaMemcpyAsync(s->input+size_t(s->n)*AbiWords+begin,s->host_input+2*begin+count,count*4,cudaMemcpyHostToDevice,capture_stream),"capture RNS chunk B upload");
+            }
+            launch_input_chunk(*s,s->n*part/FHERMA_PIPELINE_INPUT,s->n/FHERMA_PIPELINE_INPUT,capture_stream);
             cudaGraph_t definition=nullptr;
-            check(cudaStreamEndCapture(s->stream,&definition),"finish RNS input chunk capture");
+            check(cudaStreamEndCapture(capture_stream,&definition),"finish RNS input chunk capture");
             auto status=cudaGraphInstantiateWithFlags(&s->prepare_graph[part],definition,0);
             cudaGraphDestroy(definition);check(status,"instantiate RNS input chunk");
-            check(cudaGraphUpload(s->prepare_graph[part],s->stream),"upload RNS input chunk");
+            check(cudaGraphUpload(s->prepare_graph[part],capture_stream),"upload RNS input chunk");
+            if(FHERMA_CHUNK_GRAPHS) check(cudaStreamSynchronize(capture_stream),"RNS independent input graph ready");
         }
         check(cudaStreamSynchronize(s->stream),"RNS input graphs ready");
     }
@@ -678,6 +694,14 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     unsigned input_part=0;
     copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,input.a.data.data(),input.b.data.data(),words,
         [&](size_t begin,const uint32_t* a,const uint32_t* b,size_t count) {
+            if(FHERMA_CHUNK_GRAPHS && s.overlap_input) {
+                auto input_stream=s.input_streams[input_part];
+                check(cudaGraphLaunch(s.prepare_graph[input_part],input_stream),"execute upload and prepare graph");
+                check(cudaEventRecord(s.input_ready[input_part],input_stream),"RNS prepared input segment");
+                check(cudaStreamWaitEvent(s.stream,s.input_ready[input_part],0),"RNS NTT waits for prepared segment");
+                ++input_part;
+                return;
+            }
             auto transfer=s.overlap_input ? s.transfer_stream : s.stream;
             check(cudaMemcpyAsync(s.input+begin,a,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline A H2D");
             check(cudaMemcpyAsync(s.input+words+begin,b,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline B H2D");
@@ -773,6 +797,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_GRAPH
         cudaStreamSynchronize(s.stream);
         if(s.transfer_stream) cudaStreamSynchronize(s.transfer_stream);
+        for(auto input_stream:s.input_streams) if(input_stream) cudaStreamSynchronize(input_stream);
 #else
         cudaDeviceSynchronize();
 #endif
