@@ -1,5 +1,8 @@
+#ifndef FHERMA_OUTPUT_SIGNAL
+#define FHERMA_OUTPUT_SIGNAL 1
+#endif
 #ifndef FHERMA_FLUSH_OUTPUT_SOURCE
-#define FHERMA_FLUSH_OUTPUT_SOURCE 1
+#define FHERMA_FLUSH_OUTPUT_SOURCE 0
 #endif
 #ifndef FHERMA_SELECTIVE_OUTPUT_WAKE
 #define FHERMA_SELECTIVE_OUTPUT_WAKE 0
@@ -158,6 +161,9 @@
 #include <memory>
 #include <cstring>
 #include <chrono>
+#if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL && FHERMA_GRAPH
+#include "output_completion.h"
+#endif
 
 namespace {
 using namespace quartic;
@@ -770,6 +776,9 @@ void check(cudaError_t status,const char* operation) {
     if(status!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(status));
 }
 struct State {
+#if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL && FHERMA_GRAPH
+    OutputCompletion<FHERMA_PIPELINE_OUTPUT> completion;
+#endif
 #if FHERMA_ASYNC_OUTPUT_ALLOC
     // Capture the allowed NUMA mask before HostCopyPool pins the caller.
     HostOutputAllocator output_allocator;
@@ -823,6 +832,16 @@ struct State {
         cudaFreeHost(host_input);cudaFreeHost(host_output);
     }
 };
+[[maybe_unused]] void wait_output_part(State& s,unsigned part) {
+#if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
+#if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
+    if(s.completion.enabled()) {s.completion.wait(s.stream,part);return;}
+#endif
+    check(cudaEventSynchronize(s.output_ready[part]),"RNS output segment ready");
+#else
+    (void)s;(void)part;
+#endif
+}
 void mark(State& s,unsigned i,cudaStream_t stream=nullptr) {
 #if FHERMA_PROFILE
 #if FHERMA_GRAPH
@@ -1089,6 +1108,10 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaEventCreateWithFlags(&s->crt_join,cudaEventDisableTiming),"CRT branch join event");
 #endif
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
+#if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
+    static_assert(FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE,"completion flags require ordinary staged output");
+    s->completion.init(s->stream);
+#endif
     if(s->overlap_input) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
             check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS input chunk");
@@ -1182,10 +1205,17 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_GRAPH
         check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
 #if FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_OUTPUT_GRAPH
+#if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
+        s.completion.begin();
+#endif
         for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
             size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
             check(cudaMemcpyAsync(s.host_output+begin,s.input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s.stream),"RNS pipeline D2H");
-            check(cudaEventRecord(s.output_ready[part],s.stream),"record RNS output ready");
+#if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
+            if(s.completion.enabled()) s.completion.record(s.stream,part);
+            else
+#endif
+                check(cudaEventRecord(s.output_ready[part],s.stream),"record RNS output ready");
         }
 #endif
 #else
@@ -1227,7 +1257,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         auto alloc_end=std::chrono::steady_clock::now();
 #endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
-        check(cudaEventSynchronize(s.output_ready[0]),"first RNS output segment ready");
+        wait_output_part(s,0);
 #elif FHERMA_GRAPH
         check(cudaStreamSynchronize(s.stream),"RNS output ready");
 #else
@@ -1240,7 +1270,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
     for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
-        check(cudaEventSynchronize(s.output_ready[part]),"RNS output segment ready");
+        wait_output_part(s,part);
         size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
         if(FHERMA_OUTPUT_APPEND)
             output.c.data.insert(output.c.data.end(),s.host_output+begin,s.host_output+end);
