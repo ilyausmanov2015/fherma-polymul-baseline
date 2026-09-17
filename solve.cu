@@ -1,3 +1,6 @@
+#ifndef FHERMA_GRAPH
+#define FHERMA_GRAPH 1
+#endif
 #ifndef FHERMA_MONTGOMERY
 #define FHERMA_MONTGOMERY 0
 #endif
@@ -5,7 +8,7 @@
 #define FHERMA_SOA 1
 #endif
 #ifndef FHERMA_PROFILE
-#define FHERMA_PROFILE 1
+#define FHERMA_PROFILE 0
 #endif
 
 #ifndef FHERMA_TPI
@@ -18,13 +21,13 @@
 #define FHERMA_FUSED_SMALL 1
 #endif
 #ifndef FHERMA_NUMA
-#define FHERMA_NUMA 1
+#define FHERMA_NUMA 0
 #endif
 #ifndef FHERMA_REGISTER_INPUTS
 #define FHERMA_REGISTER_INPUTS 0
 #endif
 #ifndef FHERMA_PARALLEL_COPY
-#define FHERMA_PARALLEL_COPY 1
+#define FHERMA_PARALLEL_COPY 0
 #endif
 #ifndef FHERMA_STREAM_COPY
 #define FHERMA_STREAM_COPY 1
@@ -130,6 +133,10 @@ struct State {
 #if FHERMA_PARALLEL_COPY
     HostCopyPool copy;
 #endif
+#if FHERMA_GRAPH
+    cudaStream_t stream=nullptr;
+    cudaGraphExec_t graph=nullptr;
+#endif
     uint32_t n=0, logn=0;
     uint32_t *q=nullptr,*roots=nullptr,*twist=nullptr,*inv_twist=nullptr,*scale=nullptr;
     uint32_t *input=nullptr,*ab=nullptr,*c=nullptr;
@@ -139,7 +146,12 @@ struct State {
 #if FHERMA_PROFILE
     cudaEvent_t events[8]{};
 #endif
-    ~State() { cudaFree(q); cudaFree(roots); cudaFree(twist); cudaFree(inv_twist);
+    ~State() {
+#if FHERMA_GRAPH
+        if(graph) cudaGraphExecDestroy(graph);
+        if(stream) cudaStreamDestroy(stream);
+#endif
+        cudaFree(q); cudaFree(roots); cudaFree(twist); cudaFree(inv_twist);
         cudaFree(scale); cudaFree(input); cudaFree(ab); cudaFree(c);
 #if FHERMA_PINNED
         cudaFreeHost(host_input); cudaFreeHost(host_output);
@@ -228,6 +240,30 @@ __global__ void finish(const uint32_t* c,uint32_t* out,const uint32_t* scale,con
     const Big x=load_coeff(c,i,n), s=load_coeff(scale,i,n);
     decode(multiply(x,s,q),q).store(out,i);
 }
+void launch_ntt(State& s,cudaStream_t stream=nullptr) {
+    dim3 full((s.n*FHERMA_TPI+127)/128,2), halves((s.n/2*FHERMA_TPI+127)/128,2);
+    prepare<<<full,128,0,stream>>>(s.input,s.ab,s.twist,s.q,s.n,s.logn);
+    mark(s,2);
+    unsigned first=1;
+    if(FHERMA_FUSED_SMALL && s.n>=256) {
+        dim3 tiles(s.n/256,2);
+        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.ab,s.twist,s.q,s.n);
+        first=256;
+    }
+    for(unsigned half=first;half<s.n;half*=2) stage<<<halves,128,0,stream>>>(s.ab,s.twist,s.q,s.n,half);
+    mark(s,3);
+    product<<<full.x,128,0,stream>>>(s.ab,s.c,s.q,s.n,s.logn);
+    mark(s,4);
+    if(FHERMA_FUSED_SMALL && s.n>=256) {
+        unsigned tiles=s.n/256;
+        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.c,s.inv_twist,s.q,s.n);
+    }
+    for(unsigned half=first;half<s.n;half*=2) stage<<<halves.x,128,0,stream>>>(s.c,s.inv_twist,s.q,s.n,half);
+    mark(s,5);
+    finish<<<full.x,128,0,stream>>>(s.c,s.input,s.scale,s.q,s.n);
+    mark(s,6);
+    check(cudaGetLastError(),"NTT launch");
+}
 } // namespace
 
 void* fherma_init(const fherma::Point& p) {
@@ -261,11 +297,35 @@ void* fherma_init(const fherma::Point& p) {
 #if FHERMA_PROFILE
     for(auto& e:s->events) check(cudaEventCreate(&e),"profile create");
 #endif
+#if FHERMA_GRAPH
+    static_assert(FHERMA_PINNED && !FHERMA_PROFILE && !FHERMA_REGISTER_INPUTS,"graph uses fixed pinned buffers without diagnostic events");
+    check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"graph stream");
+    check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"begin capture");
+    size_t bytes=size_t(s->n)*L*4;
+    check(cudaMemcpyAsync(s->input,s->host_input,2*bytes,cudaMemcpyHostToDevice,s->stream),"capture H2D");
+    launch_ntt(*s,s->stream);
+    check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture D2H");
+    cudaGraph_t graph=nullptr;
+    check(cudaStreamEndCapture(s->stream,&graph),"end capture");
+    auto status=cudaGraphInstantiateWithFlags(&s->graph,graph,0);
+    cudaGraphDestroy(graph); check(status,"instantiate graph");
+    check(cudaGraphUpload(s->graph,s->stream),"upload graph");
+    check(cudaStreamSynchronize(s->stream),"graph ready");
+#endif
     return s.release();
 }
 fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     auto& s=*static_cast<State*>(opaque); size_t words=size_t(s.n)*L, bytes=words*4;
     if(in.a.data.size()!=words || in.b.data.size()!=words) throw std::runtime_error("input size");
+#if FHERMA_GRAPH
+    std::memcpy(s.host_input,in.a.data.data(),bytes);
+    std::memcpy(s.host_input+words,in.b.data.data(),bytes);
+    check(cudaGraphLaunch(s.graph,s.stream),"execute graph");
+    check(cudaStreamSynchronize(s.stream),"graph result ready");
+    fherma::Outputs out; out.c.shape={s.n,L};
+    out.c.data.assign(s.host_output,s.host_output+words);
+    return out;
+#else
     mark(s,0);
 #if FHERMA_PINNED
 #if FHERMA_PROFILE
@@ -298,28 +358,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     check(cudaMemcpy(s.input+words,in.b.data.data(),bytes,cudaMemcpyHostToDevice),"copy b");
 #endif
     mark(s,1);
-    dim3 full((s.n*FHERMA_TPI+127)/128,2), halves((s.n/2*FHERMA_TPI+127)/128,2);
-    prepare<<<full,128>>>(s.input,s.ab,s.twist,s.q,s.n,s.logn);
-    mark(s,2);
-    unsigned first=1;
-    if(FHERMA_FUSED_SMALL && s.n>=256) {
-        dim3 tiles(s.n/256,2);
-        small_stages<<<tiles,128*FHERMA_TPI>>>(s.ab,s.twist,s.q,s.n);
-        first=256;
-    }
-    for(unsigned half=first;half<s.n;half*=2) stage<<<halves,128>>>(s.ab,s.twist,s.q,s.n,half);
-    mark(s,3);
-    product<<<full.x,128>>>(s.ab,s.c,s.q,s.n,s.logn);
-    mark(s,4);
-    if(FHERMA_FUSED_SMALL && s.n>=256) {
-        unsigned tiles=s.n/256;
-        small_stages<<<tiles,128*FHERMA_TPI>>>(s.c,s.inv_twist,s.q,s.n);
-    }
-    for(unsigned half=first;half<s.n;half*=2) stage<<<halves.x,128>>>(s.c,s.inv_twist,s.q,s.n,half);
-    mark(s,5);
-    finish<<<full.x,128>>>(s.c,s.input,s.scale,s.q,s.n);
-    mark(s,6);
-    check(cudaGetLastError(),"NTT launch");
+    launch_ntt(s);
     fherma::Outputs out; out.c.shape={s.n,L};
 #if FHERMA_PINNED
 #if FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT
@@ -359,5 +398,6 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #endif
 #endif
     return out;
+#endif
 }
 void fherma_free(void* state) { delete static_cast<State*>(state); }

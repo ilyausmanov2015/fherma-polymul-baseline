@@ -53,6 +53,7 @@ template<class F> void emulate_launch(dim3 grid,dim3 threads,F f) {
         }
 }
 using cudaError_t=int;
+using cudaStream_t=void*;
 constexpr int cudaSuccess=0,cudaMemcpyHostToDevice=1,cudaMemcpyDeviceToHost=2;
 inline const char* cudaGetErrorString(int) { return "host emulation error"; }
 inline int cudaMalloc(uint32_t** p,size_t n) { *p=static_cast<uint32_t*>(std::calloc(1,n)); return *p?0:1; }

@@ -27,12 +27,12 @@ for m in reversed(matches):
     source=source[:m.start()]+decl+body+'co_return;\n}'+source[end:]
 source, count = re.subn(
     r'(\w+)<<<([^,<>]+),\s*([^<>]+)>>>\(([^;]+)\);',
-    r'emulate_launch(\2,\3,[&] { return \1(\4); });', source)
+    lambda m: 'emulate_launch('+m[2]+','+m[3].split(',')[0]+',[&] { return '+m[1]+'('+m[4]+'); });', source)
 assert count == 8, f'Expected 8 CUDA launch sites, saw {count}; update test adapter explicitly.'
 assert '<<<' not in source
 (BUILD / 'solve_emulated.cpp').write_text(source)
 cmd = ['clang++', '-std=c++20', '-O2', '-Wall', '-Wextra', '-I'+str(ROOT),
-       '-DFHERMA_PROFILE=0', *['-D'+d for d in args.define],
+       '-DFHERMA_PROFILE=0', '-DFHERMA_GRAPH=0', *['-D'+d for d in args.define],
        '-I/opt/homebrew/include', str(ROOT / 'main.cpp'), str(BUILD / 'solve_emulated.cpp'),
        '-L/opt/homebrew/lib', '-lgmpxx', '-lgmp', '-o', str(BUILD / 'solution')]
 subprocess.run(cmd, check=True)
