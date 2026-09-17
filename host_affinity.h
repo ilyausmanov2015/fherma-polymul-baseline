@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <dirent.h>
 #endif
 
 inline void pin_near_gpu() {
@@ -41,5 +42,24 @@ inline void pin_near_gpu() {
     if(selected<0) return;
     if(sched_setaffinity(0,sizeof(chosen),&chosen)==0)
         std::fprintf(stderr,"PLACEMENT gpu_node=%d cpu=%d allowed_on_node=%d\n",node,selected,local);
+#endif
+}
+
+// Optional init-only diagnostic for our own helper/worker placement.
+inline void report_thread_affinity() {
+#ifdef __linux__
+    DIR* directory=opendir("/proc/self/task");
+    if(!directory) return;
+    while(auto* entry=readdir(directory)) {
+        if(entry->d_name[0]<'0' || entry->d_name[0]>'9') continue;
+        std::ifstream status(std::string("/proc/self/task/")+entry->d_name+"/status");
+        std::string line,name,cpus;
+        while(std::getline(status,line)) {
+            if(line.rfind("Name:",0)==0) name=line.substr(5);
+            if(line.rfind("Cpus_allowed_list:",0)==0) cpus=line.substr(18);
+        }
+        std::fprintf(stderr,"THREAD_AFFINITY tid=%s name=%s cpus=%s\n",entry->d_name,name.c_str(),cpus.c_str());
+    }
+    closedir(directory);
 #endif
 }

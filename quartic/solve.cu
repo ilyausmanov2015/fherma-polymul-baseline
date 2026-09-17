@@ -17,7 +17,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 0
+#define FHERMA_HOST_PROFILE 1
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -56,7 +56,7 @@
 #define FHERMA_QUARTIC_COMPACT_SCALE 0
 #endif
 #ifndef FHERMA_OVERLAP_PREPARE
-#define FHERMA_OVERLAP_PREPARE 1
+#define FHERMA_OVERLAP_PREPARE 0
 #endif
 #ifndef FHERMA_CRT_TILED_OUTPUT
 #define FHERMA_CRT_TILED_OUTPUT 1
@@ -74,10 +74,10 @@
 #define FHERMA_RNS_FUSED_TRANSPOSE 1
 #endif
 #ifndef FHERMA_PIPELINE_INPUT
-#define FHERMA_PIPELINE_INPUT 4
+#define FHERMA_PIPELINE_INPUT 1
 #endif
 #ifndef FHERMA_PIPELINE_OUTPUT
-#define FHERMA_PIPELINE_OUTPUT 4
+#define FHERMA_PIPELINE_OUTPUT 1
 #endif
 #ifndef FHERMA_RNS_RADIX4
 #define FHERMA_RNS_RADIX4 1
@@ -92,7 +92,7 @@
 #define FHERMA_RNS_TAIL 1
 #endif
 #ifndef FHERMA_PROFILE
-#define FHERMA_PROFILE 0
+#define FHERMA_PROFILE 1
 #endif
 #ifndef FHERMA_GRAPH
 #define FHERMA_GRAPH 1
@@ -877,6 +877,9 @@ void* fherma_init(const fherma::Point& p) {
     cudaGraphDestroy(definition);check(status,"instantiate RNS graph");
     check(cudaGraphUpload(s->graph,s->stream),"upload RNS graph");
     check(cudaStreamSynchronize(s->stream),"RNS graph ready");
+#endif
+#if FHERMA_HOST_PROFILE
+    report_thread_affinity();
 #endif
     return s.release();
 }
