@@ -20,6 +20,9 @@
 #ifndef FHERMA_NUMA
 #define FHERMA_NUMA 1
 #endif
+#ifndef FHERMA_REGISTER_INPUTS
+#define FHERMA_REGISTER_INPUTS 1
+#endif
 
 // Exact negacyclic NTT baseline. All device modular arithmetic uses cuPQC.
 #include "fherma.h"
@@ -99,6 +102,17 @@ __device__ Big multiply(const Big& a,const Big& b,const Big& q) {
 void check(cudaError_t e,const char* op) {
     if(e!=cudaSuccess) throw std::runtime_error(std::string(op)+": "+cudaGetErrorString(e));
 }
+struct RegisteredInput {
+    void* ptr=nullptr;
+    bool pin(const uint32_t* data,size_t bytes) {
+        auto p=const_cast<uint32_t*>(data);
+        if(cudaHostRegister(p,bytes,0)==cudaSuccess) { ptr=p; return true; }
+        cudaGetLastError(); // Registration is optional; staged copies are the fallback.
+        return false;
+    }
+    void release() { if(ptr) { check(cudaHostUnregister(ptr),"unregister input"); ptr=nullptr; } }
+    ~RegisteredInput() { if(ptr) cudaHostUnregister(ptr); }
+};
 struct State {
     uint32_t n=0, logn=0;
     uint32_t *q=nullptr,*roots=nullptr,*twist=nullptr,*inv_twist=nullptr,*scale=nullptr;
@@ -241,12 +255,24 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #if FHERMA_PROFILE
     auto pack_start=std::chrono::steady_clock::now();
 #endif
-    std::memcpy(s.host_input,in.a.data.data(),bytes);
-    std::memcpy(s.host_input+words,in.b.data.data(),bytes);
+    RegisteredInput registered_a,registered_b;
+    bool registered=false;
+    if(FHERMA_REGISTER_INPUTS && bytes>=1048576)
+        registered=registered_a.pin(in.a.data.data(),bytes) && registered_b.pin(in.b.data.data(),bytes);
+    if(!registered) {
+        registered_a.release(); registered_b.release();
+        std::memcpy(s.host_input,in.a.data.data(),bytes);
+        std::memcpy(s.host_input+words,in.b.data.data(),bytes);
+    }
 #if FHERMA_PROFILE
     double pack_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-pack_start).count();
 #endif
-    check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"pinned inputs H2D");
+    if(registered) {
+        check(cudaMemcpy(s.input,in.a.data.data(),bytes,cudaMemcpyHostToDevice),"registered a H2D");
+        check(cudaMemcpy(s.input+words,in.b.data.data(),bytes,cudaMemcpyHostToDevice),"registered b H2D");
+    } else {
+        check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"pinned inputs H2D");
+    }
 #else
     check(cudaMemcpy(s.input,in.a.data.data(),bytes,cudaMemcpyHostToDevice),"copy a");
     check(cudaMemcpy(s.input+words,in.b.data.data(),bytes,cudaMemcpyHostToDevice),"copy b");
@@ -284,6 +310,8 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #if FHERMA_PROFILE
     double unpack_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-unpack_start).count();
 #endif
+    // Do not retain registrations or input pointers beyond this timed call.
+    registered_a.release(); registered_b.release();
 #else
     out.c.data.resize(words);
     check(cudaMemcpy(out.c.data.data(),s.input,bytes,cudaMemcpyDeviceToHost),"copy output / synchronize");

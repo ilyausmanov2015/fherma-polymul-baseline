@@ -59,6 +59,8 @@ inline int cudaMalloc(uint32_t** p,size_t n) { *p=static_cast<uint32_t*>(std::ca
 inline int cudaFree(void* p) { std::free(p); return 0; }
 inline int cudaMallocHost(void** p,size_t n) { *p=std::calloc(1,n); return *p?0:1; }
 inline int cudaFreeHost(void* p) { std::free(p); return 0; }
+inline int cudaHostRegister(void*,size_t,unsigned) { return 0; }
+inline int cudaHostUnregister(void*) { return 0; }
 inline int cudaMemcpy(void* dst,const void* src,size_t n,int) { std::memcpy(dst,src,n); return 0; }
 inline int cudaDeviceSynchronize() { return 0; }
 inline int cudaGetLastError() { return 0; }
