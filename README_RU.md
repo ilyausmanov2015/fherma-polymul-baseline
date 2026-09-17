@@ -3,9 +3,9 @@
 Задача: `polynomial-multiplication/negacyclic@1.0.0`,
 `c = a*b mod (X^N+1, q)`. Основная точка: `N=32768`, `W=868`, `L=28`.
 
-**Официальный результат 17 сентября 2026: 20/20, медиана 0,383 мс —
-ускорение 6,61× относительно исходного baseline.**
-На проверке 17 сентября, 20:56 МСК: **3-е место из 6**.
+**Официальный результат 17 сентября 2026: 20/20, медиана 0,378 мс —
+ускорение 6,70× относительно исходного baseline.**
+На проверке 17 сентября, 21:34 МСК: **3-е место из 6**.
 GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
 Исходники: https://github.com/ilyausmanov2015/fherma-polymul-baseline
 
@@ -27,17 +27,18 @@ GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
 | Paired H2D и восемь частей вывода | 2e1e217 | 20/20 | 0,394 мс | 0,379–0,410 мс |
 | Fenced stream writes для уведомления CPU о готовности D2H | 09dca35 | 20/20 | 0,387 мс | 0,376–0,411 мс |
 | Coalesced mapped WC input для 16 простых, Harvey NTT | a32b5aa | 20/20 | 0,383 мс | 0,374–0,397 мс |
+| Forward A/B, произведение и inverse одной плиткой без промежуточных спектров | fe5fc67 | 20/20 | 0,378 мс | 0,363–0,473 мс |
 
 Два дополнительных прогревочных случая в каждом запуске также прошли,
 но не входят в score. CUDA 12.8.61, cuPQC 0.6.0.
 
-[Новый полный запуск](https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aac2826e3bdd1a553117c55),
+[Новый полный запуск](https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aac31b1b615118421bfab6e),
 [исходный запуск](https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aaabf591be2e96f7342c7d1),
 [лидерборд](https://www.fherma.io/kernels/polynomial-multiplication/challenges/polynomial-multiplication-2025?tab=leaderboard).
 Измерения промежуточных вариантов: `results/experiments.json` и `EXPERIMENTS_RU.md`.
 В `main` могут быть включены следующие эксперименты. Для воспроизведения
 лучшего результата используйте точный конкурсный коммит
-`a32b5aaf165b9d72e808212efea33862dde31957`.
+`fe5fc6753696fdbce36f23344455caa7815d9c47`.
 
 ## Реализация
 
@@ -57,8 +58,11 @@ GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
    объединяются за проход (radix-8). Перестановка shared memory исключает
    конфликты банков в этих проходах. Хвост объединён с транспонированием; butterfly обмениваются регистрами
    через warp shuffle после одной синхронизации shared memory.
-5. Поэлементное произведение объединено с загрузкой первого блока обратного NTT.
-   Преобразование даёт остатки точной свёртки.
+5. Десять локальных стадий обоих forward, произведение и десять inverse
+   выполняются в одном блоке на двух shared tiles. Спектры не записываются
+   в global memory и не читаются повторно: удалены 32 МиБ обмена за run.
+   Между forward и inverse — явный барьер; 56 регистров, 8 КиБ shared, без spill.
+   Отдельный inverse tail завершает преобразование.
    Обратная 4-точечная DFT и cuPQC BigInt512 восстанавливают четыре знаковые
    компоненты; cuPQC BigInt896 собирает итог по q без floating point.
 6. Выход передаётся восемью частями; 8 CPU-потоков читают каждую часть
@@ -72,9 +76,9 @@ GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
 Код поддерживает степени двойки 2<=N<=32768, W=868, q=2^868-c, 0<c<2^28;
 на платформе заявлена только соревновательная точка.
 
-Полный конкурсный прогон a32b5aa: медиана 383,2485 мкс, среднее 384,063 мкс,
-диапазон 373,854–396,953 мкс. Независимый benchmark 20/20 — 383,539 мкс;
-короткий прогон 3/3 — 383,680 мкс.
+Полный конкурсный прогон fe5fc67: медиана 378,0135 мкс, среднее 383,896 мкс,
+диапазон 362,523–472,598 мкс. Независимый benchmark 20/20 — 378,100 мкс;
+короткий прогон 3/3 — 375,286 мкс.
 Отчёт: `results/best-challenge.json`. Границы CRT и журнал:
 `research/QUARTIC_RNS_RU.md`, `research/RNS_PLAN_RU.md`, `EXPERIMENTS_RU.md`.
 
@@ -89,7 +93,7 @@ GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
 
 Backend выбирается параметром CMake `-DFHERMA_SOLVER=rns`, `wide` или `quartic`.
 Для воспроизведения конкурсного результата используйте точный коммит
-a32b5aa из начала документа; журнал содержит отдельные коммиты экспериментов.
+fe5fc67 из начала документа; журнал содержит отдельные коммиты экспериментов.
 
 ## Сборка на GPU
 

@@ -515,3 +515,26 @@ fe5fc67 объединяет оба локальных forward NTT, произв
 регистра). Подготовлен ef3a49e для профиля GPU без перекрытия.
 f34b6ea — отдельная проверка CPU idle UMWAIT с runtime CPUID guard;
 1050 pool jobs и 36+4 input cases под TSan прошли локально (ARM fallback).
+
+
+## Подтверждён fused tile, 17 сентября 21:34 МСК
+
+fe5fc67 benchmark 20/20: 378,100 мкс (6aac2fc4e3bdd1a553128d69).
+Затем официальный enter 20/20: 378,0135 мкс, min 362,523, max 472,598,
+mean 383,8959; run 6aac31b1b615118421bfab6e. Оба прогрева корректны.
+Ускорение 6,70×; best-challenge.json и README обновлены.
+
+0afe15c radix-16: GPU 3/3, 374,982 мкс; длинного прогона ещё нет.
+ef3a49e профиль GPU без overlap: forward 14–16, inverse (включая fused
+tile) 28–30, product marker 0,4 мкс; сумма ~43–46 против прежних ~51.
+Его полная медиана 513,157 мкс — диагностическая, не score кандидата.
+
+Диагностика выявила 12 физических ядер / 24 SMT-потока: пары соседние.
+f34b6ea UMWAIT поддержан (waitpkg=1), но 3/3, 392,465 мкс; zero
+по-прежнему 132–150 мкс. Сам по себе этот путь не продвигается.
+Следующие b87da10 / 0032b9e / cbffd08 проверяют 16/12/8 потоков с
+physical-first affinity. Модель размещения и мотивировка документированы
+в research/PHYSICAL_CORES_RU.md. CUDA CI 16/12 успешен.
+
+046fe0a lazy prepare: 27/27 GMP, CUDA CI успешен, GPU ещё не измерен.
+7f98f30 fused + captured output: CUDA CI успешен, GPU ещё не измерен.
