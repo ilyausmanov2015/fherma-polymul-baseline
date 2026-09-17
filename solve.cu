@@ -38,6 +38,12 @@
 #ifndef FHERMA_PARALLEL_OUTPUT
 #define FHERMA_PARALLEL_OUTPUT 0
 #endif
+#ifndef FHERMA_CONSTANT_MODULUS
+#define FHERMA_CONSTANT_MODULUS 1
+#endif
+#ifndef FHERMA_SKIP_IDENTITY
+#define FHERMA_SKIP_IDENTITY 1
+#endif
 
 // Exact negacyclic NTT baseline. All device modular arithmetic uses cuPQC.
 #include "fherma.h"
@@ -115,6 +121,18 @@ __device__ Big multiply(const Big& a,const Big& b,const Big& q) {
     return p.lo;
 }
 #endif
+__device__ Mod load_modulus(const uint32_t* qp) {
+#if FHERMA_CONSTANT_MODULUS && !FHERMA_MONTGOMERY
+    // init has checked these words, so they need no global loads or registers.
+    Big q(uint32_t(0)); q[0]=qp[0];
+    #pragma unroll
+    for(unsigned k=1;k<27;++k) q[k]=0xffffffffu;
+    q[27]=15u;
+    return q;
+#else
+    return Mod(qp,0);
+#endif
+}
 void check(cudaError_t e,const char* op) {
     if(e!=cudaSuccess) throw std::runtime_error(std::string(op)+": "+cudaGetErrorString(e));
 }
@@ -177,7 +195,7 @@ __global__ void make_tables(const uint32_t* qp,const uint32_t* roots,
                            uint32_t* twist,uint32_t* inv_twist,uint32_t* scale,unsigned n) {
     unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
-    const Mod q(qp,0);
+    const Mod q=load_modulus(qp);
     const Big psi=encode(Big(roots,0),q), invpsi=encode(Big(roots,1),q), invn=encode(Big(roots,2),q);
     auto a=pow_small(psi,i,q), b=pow_small(invpsi,i,q);
     store_coeff(a,twist,i,n); store_coeff(b,inv_twist,i,n);
@@ -188,7 +206,7 @@ __global__ void prepare(const uint32_t* input,uint32_t* ab,const uint32_t* twist
     unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
     unsigned poly=blockIdx.y, j=__brev(i)>>(32-logn);
-    const Mod q(qp,0);
+    const Mod q=load_modulus(qp);
     const Big x=encode(Big(input,poly*n+i),q), t=load_coeff(twist,i,n);
     store_coeff(multiply(x,t,q),ab+poly*n*L,j,n);
 }
@@ -198,9 +216,9 @@ __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
     if(k>=n/2) return;
     unsigned j=k&(half-1), i=2*(k-j)+j;
     values+=blockIdx.y*n*L;
-    const Mod q(qp,0);
+    const Mod q=load_modulus(qp);
     const Big u=load_coeff(values,i,n), v=load_coeff(values,i+half,n), tw=load_coeff(table,j*(n/half),n);
-    auto t=multiply(v,tw,q);
+    auto t=(FHERMA_SKIP_IDENTITY && j==0) ? v : multiply(v,tw,q);
     store_coeff(u.add_mod(t,q),values,i,n); store_coeff(u.sub_mod(t,q),values,i+half,n);
 }
 // Keep the first eight radix-2 stages in shared memory. Every block handles
@@ -209,7 +227,7 @@ __global__ void small_stages(uint32_t* values,const uint32_t* table,const uint32
     __shared__ uint32_t tile[256*L];
     unsigned t=threadIdx.x/FHERMA_TPI, base=blockIdx.x*256;
     values+=blockIdx.y*n*L;
-    const Mod q(qp,0);
+    const Mod q=load_modulus(qp);
     store_coeff(load_coeff(values,base+2*t,n),tile,2*t,256);
     store_coeff(load_coeff(values,base+2*t+1,n),tile,2*t+1,256);
     __syncthreads();
@@ -217,7 +235,7 @@ __global__ void small_stages(uint32_t* values,const uint32_t* table,const uint32
         unsigned j=t&(half-1), i=2*(t-j)+j;
         const Big u=load_coeff(tile,i,256), v=load_coeff(tile,i+half,256);
         const Big tw=load_coeff(table,j*(n/half),n);
-        const Big m=multiply(v,tw,q);
+        const Big m=(FHERMA_SKIP_IDENTITY && j==0) ? v : multiply(v,tw,q);
         store_coeff(u.add_mod(m,q),tile,i,256);
         store_coeff(u.sub_mod(m,q),tile,i+half,256);
         __syncthreads();
@@ -229,14 +247,14 @@ __global__ void product(const uint32_t* ab,uint32_t* c,const uint32_t* qp,
                         unsigned n,unsigned logn) {
     unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
-    const Mod q(qp,0);
+    const Mod q=load_modulus(qp);
     const Big a=load_coeff(ab,i,n), b=load_coeff(ab+n*L,i,n);
     store_coeff(multiply(a,b,q),c,__brev(i)>>(32-logn),n);
 }
 __global__ void finish(const uint32_t* c,uint32_t* out,const uint32_t* scale,const uint32_t* qp,unsigned n) {
     unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
-    const Mod q(qp,0);
+    const Mod q=load_modulus(qp);
     const Big x=load_coeff(c,i,n), s=load_coeff(scale,i,n);
     decode(multiply(x,s,q),q).store(out,i);
 }

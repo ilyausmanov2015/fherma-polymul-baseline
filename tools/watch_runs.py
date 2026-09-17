@@ -26,8 +26,9 @@ def main():
                 entries = history()
                 if args.commit:
                     entries = [e for e in entries if e['submission']['commit'].startswith(args.commit)]
-                ids = [r['id'] for e in entries for r in e.get('runs', [])]
-                ids = ids[:1]
+                jobs=[j for e in entries for j in e.get('jobs',[])]
+                newest=max(jobs,key=lambda j:j.get('created_at') or '')['id'] if jobs else None
+                ids = [r['id'] for e in entries for r in e.get('runs', []) if r.get('job_id')==newest][:1]
                 if not ids:
                     line = json.dumps({'waiting_jobs': [{k:j.get(k) for k in ['id','status','created_at']}
                         for e in entries for j in e.get('jobs',[])]})
@@ -41,7 +42,7 @@ def main():
                 run = result.get('run', result)
                 summary = {k: run.get(k) for k in ['id','status','progress','cases','passed','failure']}
                 summary['points'] = [{k:p.get(k) for k in ['point','passed','seeds','seconds']} for p in run.get('points',[])]
-                summary['log_tail'] = str(run.get('build_log', ''))[-3500:]
+                summary['log_tail'] = str(run.get('build_log', ''))[-1200:]
                 line = json.dumps(summary, ensure_ascii=False)
                 if line != last:
                     print(line, flush=True)
