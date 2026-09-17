@@ -26,7 +26,7 @@
 #define FHERMA_INPUT_WORKERS_ONLY 0
 #endif
 #ifndef FHERMA_ASYNC_OUTPUT_ALLOC
-#define FHERMA_ASYNC_OUTPUT_ALLOC 1
+#define FHERMA_ASYNC_OUTPUT_ALLOC 0
 #endif
 #ifndef FHERMA_CRT_LIMB_SUMS
 #define FHERMA_CRT_LIMB_SUMS 0
@@ -38,7 +38,7 @@
 #define FHERMA_CRT_PIPELINE 0
 #endif
 #ifndef FHERMA_PREPARE_PRIMES
-#define FHERMA_PREPARE_PRIMES 4
+#define FHERMA_PREPARE_PRIMES 16
 #endif
 #ifndef FHERMA_HARVEY_BITS
 #define FHERMA_HARVEY_BITS 3
@@ -104,7 +104,7 @@
 #define FHERMA_MAPPED_OUTPUT 0
 #endif
 #ifndef FHERMA_MAPPED_INPUT
-#define FHERMA_MAPPED_INPUT 0
+#define FHERMA_MAPPED_INPUT 1
 #endif
 #ifndef FHERMA_QUARTIC_COMPACT_SCALE
 #define FHERMA_QUARTIC_COMPACT_SCALE 0
@@ -119,7 +119,7 @@
 #define FHERMA_RNS_TILED_PREPARE 1
 #endif
 #ifndef FHERMA_INPUT_WC
-#define FHERMA_INPUT_WC 0
+#define FHERMA_INPUT_WC 1
 #endif
 #ifndef FHERMA_STREAM_OUTPUT
 #define FHERMA_STREAM_OUTPUT 0
@@ -807,6 +807,7 @@ struct State {
     bool overlap_input=false,lazy_ntt=false;
     uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
     uint32_t *q=nullptr,*product=nullptr,*host_input=nullptr,*host_output=nullptr;
+    uint32_t* mapped_input=nullptr; // Non-owning CUDA alias, not necessarily the host address.
     SmallMod* mods=nullptr; Roots* roots=nullptr;
     Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr,*tail_forward=nullptr,*tail_inverse=nullptr,*input_powers=nullptr;
 #if FHERMA_GRAPH
@@ -879,7 +880,7 @@ template<class T> void upload(T*& destination,const std::vector<T>& source) {
 void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stream=nullptr) {
     dim3 abi_tiles((count+31)/32,2),residues((count+127)/128,2*ModCount);
     bool paired=FHERMA_MAPPED_INPUT || FHERMA_PAIRED_INPUT;
-    const uint32_t* source=FHERMA_MAPPED_INPUT ? s.host_input : s.input;
+    const uint32_t* source=FHERMA_MAPPED_INPUT ? s.mapped_input : s.input;
     if(paired) source+=size_t(2)*begin*AbiWords;
     if(FHERMA_RNS_GROUPED) {
         dim3 groups((count+31)/32,2*(ModCount/PreparePrimes));
@@ -1104,10 +1105,17 @@ void* fherma_init(const fherma::Point& p) {
     if(!FHERMA_RNS_GROUPED) check(cudaMalloc(&s->input_soa,2*bytes),"allocate limb-plane inputs");
     check(cudaMalloc(&s->ab,size_t(2)*quartic::PrimeCount*p.N*4),"allocate RNS operands");
     check(cudaMalloc(&s->c,size_t(quartic::PrimeCount)*p.N*4),"allocate RNS inverse");
-#if defined(__CUDACC__) && FHERMA_INPUT_WC
+#if defined(__CUDACC__) && FHERMA_MAPPED_INPUT
+    check(cudaHostAlloc(reinterpret_cast<void**>(&s->host_input),2*bytes,
+        cudaHostAllocMapped | (FHERMA_INPUT_WC ? cudaHostAllocWriteCombined : 0)),"mapped RNS inputs");
+    check(cudaHostGetDevicePointer(reinterpret_cast<void**>(&s->mapped_input),s->host_input,0),"map RNS input device alias");
+#elif defined(__CUDACC__) && FHERMA_INPUT_WC
     check(cudaHostAlloc(reinterpret_cast<void**>(&s->host_input),2*bytes,cudaHostAllocWriteCombined),"write-combined RNS inputs");
 #else
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_input),2*bytes),"pinned RNS inputs");
+#endif
+#ifndef __CUDACC__
+    s->mapped_input=s->host_input;
 #endif
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_output),bytes),"pinned RNS output");
     std::memset(s->host_input,0,2*bytes);std::memset(s->host_output,0,bytes);
