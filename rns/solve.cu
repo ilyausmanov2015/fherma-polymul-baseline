@@ -1,3 +1,6 @@
+#ifndef FHERMA_OVERLAP_PREPARE
+#define FHERMA_OVERLAP_PREPARE 1
+#endif
 #ifndef FHERMA_CRT_TILED_OUTPUT
 #define FHERMA_CRT_TILED_OUTPUT 1
 #endif
@@ -84,20 +87,21 @@ __device__ uint32_t multiply_mod(uint32_t a,uint32_t b,const SmallMod& modulus) 
 }
 // ABI coefficients are AoS. Transpose once so all 57 residue transforms
 // read a limb plane in contiguous warp-wide transactions.
-__global__ void transpose_inputs(const uint32_t* input,uint32_t* output,unsigned n) {
+__global__ void transpose_inputs(const uint32_t* input,uint32_t* output,unsigned n,unsigned begin=0,unsigned count=0) {
     __shared__ uint32_t tile[32*33];
-    unsigned x=threadIdx.x&31,y=threadIdx.x>>5,base=blockIdx.x*32;
+    unsigned x=threadIdx.x&31,y=threadIdx.x>>5,base=begin+blockIdx.x*32,end=count ? begin+count : n;
     input+=blockIdx.y*n*AbiWords;output+=blockIdx.y*n*AbiWords;
     for(unsigned dy=0;dy<32;dy+=8)
-        if(x<AbiWords && base+y+dy<n) tile[(y+dy)*33+x]=input[(base+y+dy)*AbiWords+x];
+        if(x<AbiWords && base+y+dy<end) tile[(y+dy)*33+x]=input[(base+y+dy)*AbiWords+x];
     __syncthreads();
     for(unsigned dy=0;dy<32;dy+=8)
-        if(y+dy<AbiWords && base+x<n) output[(y+dy)*n+base+x]=tile[x*33+y+dy];
+        if(y+dy<AbiWords && base+x<end) output[(y+dy)*n+base+x]=tile[x*33+y+dy];
 }
 __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
-                             const Twiddle* twists,const Twiddle* powers,unsigned n,unsigned logn) {
-    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
-    if(i>=n) return;
+                             const Twiddle* twists,const Twiddle* powers,unsigned n,unsigned logn,
+                             unsigned begin=0,unsigned count=0,bool natural=false) {
+    unsigned i=begin+blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=(count ? begin+count : n)) return;
     unsigned prime_i=blockIdx.y%PrimeCount,poly=blockIdx.y/PrimeCount;
     SmallMod modulus=mods[prime_i];
     const uint32_t* coefficient=input+poly*n*AbiWords+i;
@@ -111,7 +115,21 @@ __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* m
         else even=add_mod(even,term,modulus.p);
     }
     uint32_t value=shoup(add_mod(even,odd,modulus.p),twists[prime_i*n+i],modulus.p);
-    ab[blockIdx.y*n+(__brev(i)>>(32-logn))]=value;
+    ab[blockIdx.y*n+(natural ? i : (__brev(i)>>(32-logn)))]=value;
+}
+// The chunk converter writes natural order while H2D is still active.
+// Permute only after all chunks are ready, using coalesced loads and stores.
+__global__ void reverse_rns(const uint32_t* source,uint32_t* destination,unsigned n) {
+    __shared__ uint32_t tile[32*33];
+    unsigned x=threadIdx.x&31,y0=threadIdx.x>>5;
+    source+=blockIdx.y*n;destination+=blockIdx.y*n;
+    #pragma unroll
+    for(unsigned y=y0;y<32;y+=8) tile[y*33+x]=source[(y<<10)+(blockIdx.x<<5)+x];
+    __syncthreads();
+    unsigned reverse_x=__brev(x)>>27,reverse_middle=__brev(blockIdx.x)>>27;
+    #pragma unroll
+    for(unsigned y=y0;y<32;y+=8)
+        destination[(y<<10)+(reverse_middle<<5)+x]=tile[reverse_x*33+(__brev(y)>>27)];
 }
 // For N=2^15, split the index into three groups of five bits. Fix the
 // middle group and transpose the outer groups through padded shared memory.
@@ -367,12 +385,16 @@ void check(cudaError_t status,const char* operation) {
 struct State {
     HostCopyPool copy;
     unsigned n=0,logn=0;
+    bool overlap_input=false;
     uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
     uint32_t *q=nullptr,*product_mod_q=nullptr,*host_input=nullptr,*host_output=nullptr;
     SmallMod* mods=nullptr;
     Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr,*tail_forward=nullptr,*tail_inverse=nullptr,*input_powers=nullptr;
 #if FHERMA_GRAPH
     cudaStream_t stream=nullptr;cudaGraphExec_t graph=nullptr;
+    cudaStream_t transfer_stream=nullptr;
+    cudaEvent_t input_ready[FHERMA_PIPELINE_INPUT]{};
+    cudaGraphExec_t prepare_graph[FHERMA_PIPELINE_INPUT]{};
 #if FHERMA_PIPELINE_OUTPUT>1
     cudaEvent_t output_ready[FHERMA_PIPELINE_OUTPUT]{};
 #endif
@@ -383,7 +405,10 @@ struct State {
     ~State() {
 #if FHERMA_GRAPH
         if(graph) cudaGraphExecDestroy(graph);
+        for(auto executable:prepare_graph) if(executable) cudaGraphExecDestroy(executable);
         if(stream) cudaStreamDestroy(stream);
+        if(transfer_stream) cudaStreamDestroy(transfer_stream);
+        for(auto event:input_ready) if(event) cudaEventDestroy(event);
 #if FHERMA_PIPELINE_OUTPUT>1
         for(auto event:output_ready) if(event) cudaEventDestroy(event);
 #endif
@@ -415,9 +440,20 @@ template<class T> void upload(T*& destination,const std::vector<T>& source) {
     check(cudaMalloc(&destination,source.size()*sizeof(T)),"allocate parameter table");
     check(cudaMemcpy(destination,source.data(),source.size()*sizeof(T),cudaMemcpyHostToDevice),"upload parameter table");
 }
+void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stream=nullptr) {
+    dim3 abi_tiles((count+31)/32,2),residues((count+127)/128,2*PrimeCount);
+    transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n,begin,count);
+    prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn,begin,count,true);
+    check(cudaGetLastError(),"RNS input chunk kernels");
+}
 void launch_rns(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
-    if(FHERMA_RNS_GROUPED) {
+    uint32_t* prepared=s.ab;
+    if(s.overlap_input) {
+        dim3 permutation(32,2*PrimeCount);
+        reverse_rns<<<permutation,256,0,stream>>>(s.ab,s.scratch,s.n);
+        prepared=s.scratch;
+    } else if(FHERMA_RNS_GROUPED) {
         dim3 groups((s.n+31)/32,2*((PrimeCount+3)/4));
         prepare_grouped<<<groups,128,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn);
     } else {
@@ -432,19 +468,20 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     unsigned first=1;
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,2*PrimeCount);
-        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX4?4:2),0,stream>>>(s.ab,s.mods,s.small_forward,s.n);
+        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX4?4:2),0,stream>>>(prepared,s.mods,s.small_forward,s.n);
         first=Tile;
     }
-    uint32_t* forward_values=s.ab;
+    uint32_t* forward_values=prepared;
     if(FHERMA_RNS_TAIL && s.n==32768) {
         dim3 transposes(32,2*PrimeCount),tails(128,2*PrimeCount);
+        uint32_t* transposed=s.overlap_input ? s.ab : s.scratch;
         if(FHERMA_RNS_FUSED_TRANSPOSE) {
-            fused_tail_rns<<<tails,128,0,stream>>>(s.ab,s.scratch,s.mods,s.tail_forward,s.n);
+            fused_tail_rns<<<tails,128,0,stream>>>(prepared,transposed,s.mods,s.tail_forward,s.n);
         } else {
-            transpose_rns<<<transposes,256,0,stream>>>(s.ab,s.scratch,s.n);
-            tail_rns<<<tails,128,0,stream>>>(s.scratch,s.mods,s.tail_forward,s.n);
+            transpose_rns<<<transposes,256,0,stream>>>(prepared,transposed,s.n);
+            tail_rns<<<tails,128,0,stream>>>(transposed,s.mods,s.tail_forward,s.n);
         }
-        forward_values=s.scratch;
+        forward_values=transposed;
     } else for(unsigned h=first;h<s.n;h*=2)
         stage_rns<<<half,128,0,stream>>>(s.ab,s.mods,s.forward,s.n,h,s.n/h);
     mark(s,3,stream);
@@ -488,6 +525,9 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments fit the smallest point");
     pin_near_gpu();
     auto s=std::make_unique<State>();s->n=p.N;s->logn=__builtin_ctz(p.N);
+    s->overlap_input=FHERMA_OVERLAP_PREPARE && FHERMA_PIPELINE_INPUT>1 && FHERMA_RNS_TAIL && p.N==32768;
+    static_assert(!FHERMA_OVERLAP_PREPARE || (!FHERMA_PROFILE && !FHERMA_RNS_GROUPED),"chunk prepare uses SoA without diagnostic events");
+    static_assert(FHERMA_PIPELINE_INPUT>0 && (32768%FHERMA_PIPELINE_INPUT)==0,"input chunks must contain whole coefficients");
     auto constants=rns::setup(p.N,p.q.data);
     upload(s->input_powers,constants.input_powers);
     upload(s->mods,constants.mods);upload(s->bases,constants.bases_mod_q);
@@ -530,10 +570,26 @@ void* fherma_init(const fherma::Point& p) {
     for(auto& event:s->events) check(cudaEventCreate(&event),"RNS profile event");
 #endif
 #if FHERMA_GRAPH
+    if(s->overlap_input) {
+        check(cudaStreamCreateWithFlags(&s->transfer_stream,cudaStreamNonBlocking),"RNS input transfer stream");
+        for(auto& event:s->input_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"RNS input segment event");
+    }
 #if FHERMA_PIPELINE_OUTPUT>1
     for(auto& event:s->output_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"RNS output segment event");
 #endif
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
+    if(s->overlap_input) {
+        for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
+            check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS input chunk");
+            launch_input_chunk(*s,s->n*part/FHERMA_PIPELINE_INPUT,s->n/FHERMA_PIPELINE_INPUT,s->stream);
+            cudaGraph_t definition=nullptr;
+            check(cudaStreamEndCapture(s->stream,&definition),"finish RNS input chunk capture");
+            auto status=cudaGraphInstantiateWithFlags(&s->prepare_graph[part],definition,0);
+            cudaGraphDestroy(definition);check(status,"instantiate RNS input chunk");
+            check(cudaGraphUpload(s->prepare_graph[part],s->stream),"upload RNS input chunk");
+        }
+        check(cudaStreamSynchronize(s->stream),"RNS input graphs ready");
+    }
     check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS graph");
     mark(*s,0,s->stream);
 #if FHERMA_PIPELINE_INPUT<=1
@@ -563,10 +619,18 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     auto pack_start=std::chrono::steady_clock::now();
 #endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_INPUT>1
+    unsigned input_part=0;
     copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,input.a.data.data(),input.b.data.data(),words,
         [&](size_t begin,const uint32_t* a,const uint32_t* b,size_t count) {
-            check(cudaMemcpyAsync(s.input+begin,a,count*4,cudaMemcpyHostToDevice,s.stream),"RNS pipeline A H2D");
-            check(cudaMemcpyAsync(s.input+words+begin,b,count*4,cudaMemcpyHostToDevice,s.stream),"RNS pipeline B H2D");
+            auto transfer=s.overlap_input ? s.transfer_stream : s.stream;
+            check(cudaMemcpyAsync(s.input+begin,a,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline A H2D");
+            check(cudaMemcpyAsync(s.input+words+begin,b,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline B H2D");
+            if(s.overlap_input) {
+                check(cudaEventRecord(s.input_ready[input_part],transfer),"RNS input segment uploaded");
+                check(cudaStreamWaitEvent(s.stream,s.input_ready[input_part],0),"RNS prepare waits for input segment");
+                check(cudaGraphLaunch(s.prepare_graph[input_part],s.stream),"execute RNS input chunk");
+            }
+            ++input_part;
         });
 #else
     s.copy.inputs(s.host_input,input.a.data.data(),input.b.data.data(),bytes);
@@ -588,6 +652,8 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         mark(s,0);
         check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"RNS H2D");
         mark(s,1);
+        if(s.overlap_input) for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part)
+            launch_input_chunk(s,s.n*part/FHERMA_PIPELINE_INPUT,s.n/FHERMA_PIPELINE_INPUT);
         launch_rns(s);
 #endif
         output.c.data.reserve(words);
@@ -636,6 +702,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     } catch(...) {
 #if FHERMA_GRAPH
         cudaStreamSynchronize(s.stream);
+        if(s.transfer_stream) cudaStreamSynchronize(s.transfer_stream);
 #else
         cudaDeviceSynchronize();
 #endif
