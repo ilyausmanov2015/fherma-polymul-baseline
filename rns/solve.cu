@@ -1,3 +1,6 @@
+#ifndef FHERMA_HOST_PROFILE
+#define FHERMA_HOST_PROFILE 1
+#endif
 #ifndef FHERMA_OVERLAP_PREPARE
 #define FHERMA_OVERLAP_PREPARE 1
 #endif
@@ -615,7 +618,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     size_t words=size_t(s.n)*rns::AbiWords,bytes=words*4;
     if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
     try {
-#if FHERMA_PROFILE
+#if FHERMA_PROFILE || FHERMA_HOST_PROFILE
     auto pack_start=std::chrono::steady_clock::now();
 #endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_INPUT>1
@@ -635,7 +638,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #else
     s.copy.inputs(s.host_input,input.a.data.data(),input.b.data.data(),bytes);
 #endif
-#if FHERMA_PROFILE
+#if FHERMA_PROFILE || FHERMA_HOST_PROFILE
     auto pack_end=std::chrono::steady_clock::now();
 #endif
     fherma::Outputs output;output.c.shape={s.n,rns::AbiWords};
@@ -656,9 +659,15 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
             launch_input_chunk(s,s.n*part/FHERMA_PIPELINE_INPUT,s.n/FHERMA_PIPELINE_INPUT);
         launch_rns(s);
 #endif
+#if FHERMA_HOST_PROFILE
+        auto alloc_start=std::chrono::steady_clock::now();
+#endif
         output.c.data.reserve(words);
         s.copy.prefault(output.c.data.data(),bytes);
         output.c.data.resize(words);
+#if FHERMA_HOST_PROFILE
+        auto alloc_end=std::chrono::steady_clock::now();
+#endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
         check(cudaEventSynchronize(s.output_ready[0]),"first RNS output segment ready");
 #elif FHERMA_GRAPH
@@ -668,7 +677,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         mark(s,7);
         check(cudaDeviceSynchronize(),"RNS diagnostic events ready");
 #endif
-#if FHERMA_PROFILE
+#if FHERMA_PROFILE || FHERMA_HOST_PROFILE
     auto unpack_start=std::chrono::steady_clock::now();
 #endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
@@ -680,8 +689,10 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #else
     s.copy.output(output.c.data.data(),s.host_output,bytes);
 #endif
-#if FHERMA_PROFILE
+#if FHERMA_PROFILE || FHERMA_HOST_PROFILE
     auto unpack_end=std::chrono::steady_clock::now();
+#endif
+#if FHERMA_PROFILE
     const char* names[]={"h2d","prepare","forward","product","inverse","finish","d2h"};
     float elapsed[7]{};bool valid=true;
     for(unsigned k=0;k<7;++k) {
@@ -697,6 +708,12 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     }
     auto us=[](auto a,auto b) {return std::chrono::duration<double,std::micro>(b-a).count();};
     std::fprintf(stderr,"\nHOST_US pack=%.3f unpack=%.3f\n",us(pack_start,pack_end),us(unpack_start,unpack_end));
+#endif
+#if FHERMA_HOST_PROFILE
+    auto host_us=[](auto a,auto b) {return std::chrono::duration<double,std::micro>(b-a).count();};
+    std::fprintf(stderr,"HOST_US pack=%.3f submit=%.3f alloc=%.3f wait=%.3f unpack=%.3f\n",
+                 host_us(pack_start,pack_end),host_us(pack_end,alloc_start),host_us(alloc_start,alloc_end),
+                 host_us(alloc_end,unpack_start),host_us(unpack_start,unpack_end));
 #endif
     return output;
     } catch(...) {
