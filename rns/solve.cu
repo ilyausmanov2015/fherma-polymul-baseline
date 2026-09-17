@@ -1,11 +1,16 @@
 #ifndef FHERMA_LIBRARY_NTT
-#define FHERMA_LIBRARY_NTT 1
+#define FHERMA_LIBRARY_NTT 0
+#endif
+#ifndef FHERMA_TENSOR_PREPARE
+#define FHERMA_TENSOR_PREPARE 1
 #endif
 #ifndef __CUDACC__
 // The CPU adapter cannot execute cuPQC's device-LTO NTT. It only validates
 // our native fallback; the library integration requires real GPU checking.
 #undef FHERMA_LIBRARY_NTT
 #define FHERMA_LIBRARY_NTT 0
+#undef FHERMA_TENSOR_PREPARE
+#define FHERMA_TENSOR_PREPARE 0
 #endif
 #ifndef FHERMA_HOST_PROFILE
 #define FHERMA_HOST_PROFILE 0
@@ -73,6 +78,9 @@
 #include <chrono>
 #if FHERMA_LIBRARY_NTT
 #include "rns/library_ntt.h"
+#endif
+#if FHERMA_TENSOR_PREPARE
+#include "rns/tensor_prepare.h"
 #endif
 
 namespace {
@@ -403,6 +411,9 @@ struct State {
 #if FHERMA_LIBRARY_NTT
     rns_library::Tables library;
 #endif
+#if FHERMA_TENSOR_PREPARE
+    rns_tensor::Converter tensor;
+#endif
     unsigned n=0,logn=0;
     bool overlap_input=false;
     uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
@@ -460,6 +471,12 @@ template<class T> void upload(T*& destination,const std::vector<T>& source) {
     check(cudaMemcpy(destination,source.data(),source.size()*sizeof(T),cudaMemcpyHostToDevice),"upload parameter table");
 }
 void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stream=nullptr) {
+#if FHERMA_TENSOR_PREPARE
+    if(s.n==32768) {
+        s.tensor.launch(s.input,s.ab,s.mods,s.forward,s.n,begin,count,stream);
+        return;
+    }
+#endif
     dim3 abi_tiles((count+31)/32,2),residues((count+127)/128,2*PrimeCount);
     transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n,begin,count);
     prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn,begin,count,true);
@@ -558,6 +575,10 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(!FHERMA_OVERLAP_PREPARE || (!FHERMA_PROFILE && !FHERMA_RNS_GROUPED),"chunk prepare uses SoA without diagnostic events");
     static_assert(FHERMA_PIPELINE_INPUT>0 && (32768%FHERMA_PIPELINE_INPUT)==0,"input chunks must contain whole coefficients");
     auto constants=rns::setup(p.N,p.q.data);
+#if FHERMA_TENSOR_PREPARE
+    static_assert(FHERMA_OVERLAP_PREPARE,"tensor preparation currently uses the chunk pipeline");
+    if(p.N==32768) s->tensor.init(p.N,constants.mods);
+#endif
     upload(s->input_powers,constants.input_powers);
     upload(s->mods,constants.mods);upload(s->bases,constants.bases_mod_q);
     constants.product_mod_q.resize(rns::AccumWords,0);
@@ -610,6 +631,9 @@ void* fherma_init(const fherma::Point& p) {
     for(auto& event:s->output_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"RNS output segment event");
 #endif
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
+#if FHERMA_TENSOR_PREPARE
+    if(p.N==32768) s->tensor.bind(s->stream);
+#endif
     if(s->overlap_input) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
             check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS input chunk");

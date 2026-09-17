@@ -35,7 +35,9 @@ else()
   message(FATAL_ERROR "Unknown FHERMA_SOLVER: ${FHERMA_SOLVER}")
 endif()
 find_package(Threads REQUIRED)
+find_package(CUDAToolkit REQUIRED)
 target_link_libraries(solution PRIVATE Threads::Threads)
+target_link_libraries(solution PRIVATE CUDA::cublas)
 target_include_directories(solution PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 set_target_properties(solution PROPERTIES
