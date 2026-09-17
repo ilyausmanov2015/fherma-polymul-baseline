@@ -1,3 +1,6 @@
+#ifndef FHERMA_PREPARE_PRIMES
+#define FHERMA_PREPARE_PRIMES 8
+#endif
 #ifndef FHERMA_HARVEY_BITS
 #define FHERMA_HARVEY_BITS 4
 #endif
@@ -5,7 +8,7 @@
 #define FHERMA_HARVEY 0
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 1
+#define FHERMA_OUTPUT_GRAPH 0
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -215,17 +218,19 @@ __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* m
     unsigned pi=blockIdx.y%ModCount,poly=blockIdx.y/ModCount;
     prepare_coefficient(input+poly*n*AbiWords+i,n,ab,twists,powers,roots,n,logn,i,pi,poly,mods[pi].p,natural);
 }
-// Four warps share one AoS tile, each warp evaluating a different prime.
+constexpr unsigned PreparePrimes=FHERMA_PREPARE_PRIMES,PrepareThreads=32*PreparePrimes;
+static_assert(PreparePrimes==4 || PreparePrimes==8 || PreparePrimes==16,"group 4, 8 or 16 primes");
+// Warps share one AoS tile, each warp evaluating a different prime.
 __global__ void prepare_grouped(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
                              const Twiddle* twists,const Twiddle* powers,const Roots* roots,unsigned n,unsigned logn,
                              unsigned begin=0,unsigned count=0,bool natural=false,bool packed=false) {
     __shared__ uint32_t tile[32*29];
     unsigned t=threadIdx.x,lane=t&31,warp=t>>5;
-    unsigned pi=(blockIdx.y%(ModCount/4))*4+warp,poly=blockIdx.y/(ModCount/4);
+    unsigned pi=(blockIdx.y%(ModCount/PreparePrimes))*PreparePrimes+warp,poly=blockIdx.y/(ModCount/PreparePrimes);
     unsigned base=begin+blockIdx.x*32,end=count ? begin+count : n;
     input+=poly*(packed ? count : n)*AbiWords;
     #pragma unroll
-    for(unsigned index=t;index<32*AbiWords;index+=128) {
+    for(unsigned index=t;index<32*AbiWords;index+=PrepareThreads) {
         unsigned row=index/AbiWords,word=index%AbiWords;
         if(base+row<end) tile[row*29+word]=input[(base+row-(packed ? begin : 0))*AbiWords+word];
     }
@@ -788,8 +793,8 @@ void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stre
     const uint32_t* source=FHERMA_MAPPED_INPUT ? s.host_input : s.input;
     if(paired) source+=size_t(2)*begin*AbiWords;
     if(FHERMA_RNS_GROUPED) {
-        dim3 groups((count+31)/32,2*(ModCount/4));
-        prepare_grouped<<<groups,128,0,stream>>>(source,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true,paired);
+        dim3 groups((count+31)/32,2*(ModCount/PreparePrimes));
+        prepare_grouped<<<groups,PrepareThreads,0,stream>>>(source,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true,paired);
     } else {
     transpose_inputs<<<abi_tiles,256,0,stream>>>(source,s.input_soa,s.n,begin,count,paired);
     prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true);
@@ -810,8 +815,8 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
     } else {
         dim3 abi_tiles((s.n+31)/32,2),residues((s.n+127)/128,2*ModCount);
         if(FHERMA_RNS_GROUPED) {
-            dim3 groups((s.n+31)/32,2*(ModCount/4));
-            prepare_grouped<<<groups,128,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
+            dim3 groups((s.n+31)/32,2*(ModCount/PreparePrimes));
+            prepare_grouped<<<groups,PrepareThreads,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
         } else {
         transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n);
         prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
