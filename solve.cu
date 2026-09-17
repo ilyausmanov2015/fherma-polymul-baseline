@@ -1,3 +1,6 @@
+#ifndef FHERMA_FUSED_PREPARE
+#define FHERMA_FUSED_PREPARE 1
+#endif
 #ifndef FHERMA_SPECIAL_ADD_SUB
 #define FHERMA_SPECIAL_ADD_SUB 1
 #endif
@@ -299,13 +302,22 @@ __global__ __launch_bounds__(128,FHERMA_MIN_BLOCKS)
 #else
 __global__
 #endif
-void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsigned n) {
+void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsigned n,
+                  const uint32_t* raw_input,unsigned logn) {
     __shared__ uint32_t tile[256*L];
     unsigned t=threadIdx.x/FHERMA_TPI, base=blockIdx.x*256;
     values+=blockIdx.y*n*L;
     const Mod q=load_modulus(qp);
-    store_coeff(load_coeff(values,base+2*t,n),tile,2*t,256);
-    store_coeff(load_coeff(values,base+2*t+1,n),tile,2*t+1,256);
+    if(raw_input) {
+        for(unsigned offset=0;offset<2;++offset) {
+            unsigned local=2*t+offset, i=__brev(base+local)>>(32-logn);
+            const Big x=encode(Big(raw_input,blockIdx.y*n+i),q),tw=load_coeff(table,i,n);
+            store_coeff(multiply(x,tw,q),tile,local,256);
+        }
+    } else {
+        store_coeff(load_coeff(values,base+2*t,n),tile,2*t,256);
+        store_coeff(load_coeff(values,base+2*t+1,n),tile,2*t+1,256);
+    }
     __syncthreads();
     for(unsigned half=1;half<256;half*=2) {
         unsigned j=t&(half-1), i=2*(t-j)+j;
@@ -379,12 +391,13 @@ __global__ void finish(const uint32_t* c,uint32_t* out,const uint32_t* scale,con
 }
 void launch_ntt(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n*FHERMA_TPI+127)/128,2), halves((s.n/2*FHERMA_TPI+127)/128,2);
-    prepare<<<full,128,0,stream>>>(s.input,s.ab,s.twist,s.q,s.n,s.logn);
+    bool fused_prepare=FHERMA_FUSED_PREPARE && FHERMA_FUSED_SMALL && s.n>=256;
+    if(!fused_prepare) prepare<<<full,128,0,stream>>>(s.input,s.ab,s.twist,s.q,s.n,s.logn);
     mark(s,2);
     unsigned first=1;
     if(FHERMA_FUSED_SMALL && s.n>=256) {
         dim3 tiles(s.n/256,2);
-        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.ab,s.twist,s.q,s.n);
+        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.ab,s.twist,s.q,s.n,fused_prepare?s.input:nullptr,s.logn);
         first=256;
     }
     uint32_t* forward_values=s.ab;
@@ -401,7 +414,7 @@ void launch_ntt(State& s,cudaStream_t stream=nullptr) {
     mark(s,4);
     if(FHERMA_FUSED_SMALL && s.n>=256) {
         unsigned tiles=s.n/256;
-        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.c,s.inv_twist,s.q,s.n);
+        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.c,s.inv_twist,s.q,s.n,nullptr,s.logn);
     }
     uint32_t* inverse_values=s.c;
     if(FHERMA_FUSED_TAIL && s.n==32768) {
