@@ -1,8 +1,8 @@
 {
   "kind": "official-fherma-best-challenge",
-  "run_id": "6aac05eee3bdd1a5530d72e3",
-  "commit": "9d717d4bb90aa0e17c5b0b479ab0b9028b57e9df",
-  "url": "https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aac05eee3bdd1a5530d72e3",
+  "run_id": "6aac0828e3bdd1a5530da697",
+  "commit": "4a5662f2f7078506a5f7fdf50d5b1f97e3d21ab2",
+  "url": "https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aac0828e3bdd1a5530da697",
   "status": "finished",
   "cases": 20,
   "passed": 20,
@@ -28,15 +28,15 @@
       "seeds": 20,
       "passed": 20,
       "seconds": {
-        "min": 0.00040231,
-        "median": 0.000421164,
-        "mean": 0.0004192534500000001,
-        "max": 0.000430625
+        "min": 0.000403293,
+        "median": 0.000412467,
+        "mean": 0.00041489170000000004,
+        "max": 0.000432984
       },
       "memory_mb": {
-        "min": 141,
-        "median": 141,
-        "max": 141
+        "min": 140.6,
+        "median": 140.6,
+        "max": 140.6
       }
     }
   ]
