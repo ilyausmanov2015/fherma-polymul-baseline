@@ -26,7 +26,7 @@ endif()
 # -arch= instead.
 set(FHERMA_CUDA_ARCH native CACHE STRING "nvcc -arch value")
 
-set(FHERMA_SOLVER rns CACHE STRING "Arithmetic backend: wide, rns, or quartic")
+set(FHERMA_SOLVER quartic CACHE STRING "Arithmetic backend: wide, rns, or quartic")
 if(FHERMA_SOLVER STREQUAL "rns")
   add_executable(solution main.cpp rns/solve.cu)
 elseif(FHERMA_SOLVER STREQUAL "quartic")
