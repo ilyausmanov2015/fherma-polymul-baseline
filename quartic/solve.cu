@@ -1,5 +1,8 @@
+#ifndef FHERMA_OUTPUT_RING
+#define FHERMA_OUTPUT_RING 4
+#endif
 #ifndef FHERMA_TRANSFER_PROBE
-#define FHERMA_TRANSFER_PROBE 1
+#define FHERMA_TRANSFER_PROBE 0
 #endif
 #ifndef FHERMA_INTERLEAVED_INPUT
 #define FHERMA_INTERLEAVED_INPUT 0
@@ -8,7 +11,7 @@
 #define FHERMA_INPUT_COPY_GRAPH 0
 #endif
 #ifndef FHERMA_PIPELINE_PROFILE
-#define FHERMA_PIPELINE_PROFILE 1
+#define FHERMA_PIPELINE_PROFILE 0
 #endif
 #ifndef FHERMA_PREPARE_VECTOR
 #define FHERMA_PREPARE_VECTOR 0
@@ -122,7 +125,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 1
+#define FHERMA_HOST_PROFILE 0
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -155,7 +158,7 @@
 #define FHERMA_MAPPED_OUTPUT 0
 #endif
 #ifndef FHERMA_MAPPED_INPUT
-#define FHERMA_MAPPED_INPUT 0
+#define FHERMA_MAPPED_INPUT 1
 #endif
 #ifndef FHERMA_QUARTIC_COMPACT_SCALE
 #define FHERMA_QUARTIC_COMPACT_SCALE 0
@@ -1039,6 +1042,9 @@ void check(cudaError_t status,const char* operation) {
     if(status!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(status));
 }
 struct State {
+    static_assert(FHERMA_OUTPUT_RING>=1 && (FHERMA_OUTPUT_RING==1 ||
+        (!FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE && !FHERMA_CRT_OUTPUT_SIGNAL && !FHERMA_MAPPED_OUTPUT && !FHERMA_OUTPUT_WC)),
+        "rotating output requires uncaptured ordinary pinned DMA destinations");
 #if defined(__CUDACC__) && FHERMA_INPUT_GRAPH && FHERMA_GRAPH
     InputCompletion<FHERMA_PIPELINE_INPUT> input_completion;
     cudaEvent_t input_root=nullptr;
@@ -1058,6 +1064,10 @@ struct State {
     bool overlap_input=false,lazy_ntt=false,input_graph=false,direct_output=false;
     uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
     uint32_t *q=nullptr,*product=nullptr,*host_input=nullptr,*host_output=nullptr;
+#if FHERMA_OUTPUT_RING>1
+    uint32_t* host_output_base=nullptr;
+    unsigned output_slot=0;
+#endif
     uint32_t* mapped_input=nullptr; // Non-owning CUDA alias, not necessarily the host address.
     uint32_t *mapped_output=nullptr,*output_counters=nullptr,*output_flags=nullptr;
     SmallMod* mods=nullptr; Roots* roots=nullptr;
@@ -1119,7 +1129,12 @@ struct State {
         cudaFree(q);cudaFree(product);cudaFree(mods);cudaFree(forward);cudaFree(inverse);
         cudaFree(output_counters);
         cudaFree(roots);cudaFree(scale);cudaFree(small_forward);cudaFree(small_inverse);cudaFree(tail_forward);cudaFree(tail_inverse);cudaFree(input_powers);
-        cudaFreeHost(host_input);cudaFreeHost(host_output);
+        cudaFreeHost(host_input);
+#if FHERMA_OUTPUT_RING>1
+        cudaFreeHost(host_output_base);
+#else
+        cudaFreeHost(host_output);
+#endif
     }
 };
 [[maybe_unused]] void wait_output_part(State& s,unsigned part) {
@@ -1406,13 +1421,16 @@ void* fherma_init(const fherma::Point& p) {
 #elif defined(__CUDACC__) && FHERMA_OUTPUT_WC
     check(cudaHostAlloc(reinterpret_cast<void**>(&s->host_output),bytes,cudaHostAllocWriteCombined),"WC pinned RNS output");
 #else
-    check(cudaMallocHost(reinterpret_cast<void**>(&s->host_output),bytes),"pinned RNS output");
+    check(cudaMallocHost(reinterpret_cast<void**>(&s->host_output),bytes*FHERMA_OUTPUT_RING),"pinned RNS output");
     s->mapped_output=s->host_output;
+#endif
+#if FHERMA_OUTPUT_RING>1
+    s->host_output_base=s->host_output;
 #endif
 #ifndef __CUDACC__
     s->direct_output=FHERMA_CRT_OUTPUT_SIGNAL && s->n==32768;
 #endif
-    std::memset(s->host_input,0,2*bytes);std::memset(s->host_output,0,bytes);
+    std::memset(s->host_input,0,2*bytes);std::memset(s->host_output,0,bytes*FHERMA_OUTPUT_RING);
 #if (FHERMA_INPUT_WC || FHERMA_OUTPUT_WC) && defined(__x86_64__) && defined(__GNUC__)
     _mm_mfence(); // Publish initialization of the empty WC staging buffers.
 #endif
@@ -1550,6 +1568,13 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     auto& s=*static_cast<State*>(opaque);
     [[maybe_unused]] size_t words=size_t(s.n)*quartic::AbiWords,bytes=words*4;
     if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
+#if FHERMA_OUTPUT_RING>1
+    // Owned intermediate buffers only. Every byte is overwritten by this
+    // call's computed result before the CPU reads it; no answers are reused.
+    s.host_output=s.host_output_base+words*s.output_slot;
+    s.mapped_output=s.host_output;
+    s.output_slot=(s.output_slot+1)%FHERMA_OUTPUT_RING;
+#endif
     fherma::Outputs output;output.c.shape={s.n,quartic::AbiWords};
 #if FHERMA_HOST_PROFILE
     [[maybe_unused]] auto host_run_start=std::chrono::steady_clock::now();
