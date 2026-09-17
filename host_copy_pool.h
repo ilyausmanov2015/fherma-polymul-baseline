@@ -26,6 +26,9 @@
 #ifndef FHERMA_SPIN_COPY
 #define FHERMA_SPIN_COPY 0
 #endif
+#ifndef FHERMA_COPY_ACKS
+#define FHERMA_COPY_ACKS 0
+#endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
@@ -42,6 +45,8 @@ class HostCopyPool {
 #if FHERMA_SPIN_COPY
     alignas(64) std::atomic<unsigned> spin_generation_{0};
     alignas(64) std::atomic<unsigned> spin_pending_{0};
+    struct alignas(64) Completion { std::atomic<unsigned> generation{0}; };
+    std::array<Completion,Threads-1> completed_;
     alignas(64) std::atomic<bool> spin_stop_{false};
     static void pause() {
 #if defined(__x86_64__)
@@ -85,7 +90,11 @@ class HostCopyPool {
             if(generation==seen) { pause(); continue; }
             auto job=job_; seen=generation;
             part(job,rank);
+#if FHERMA_COPY_ACKS
+            completed_[rank].generation.store(generation,std::memory_order_release);
+#else
             spin_pending_.fetch_sub(1,std::memory_order_release);
+#endif
         }
 #else
         std::unique_lock<std::mutex> lock(mutex_);
@@ -110,10 +119,17 @@ class HostCopyPool {
     void run(Job job) {
 #if FHERMA_SPIN_COPY
         job_=job;
+#if FHERMA_COPY_ACKS
+        unsigned generation=spin_generation_.fetch_add(1,std::memory_order_release)+1;
+        part(job,Threads-1);
+        for(auto& worker:completed_)
+            while(worker.generation.load(std::memory_order_acquire)!=generation) pause();
+#else
         spin_pending_.store(Threads-1,std::memory_order_relaxed);
         spin_generation_.fetch_add(1,std::memory_order_release);
         part(job,Threads-1);
         while(spin_pending_.load(std::memory_order_acquire)) pause();
+#endif
 #else
         { std::lock_guard<std::mutex> lock(mutex_); job_=job; pending_=Threads-1; ++generation_; }
         start_.notify_all(); part(job,Threads-1);

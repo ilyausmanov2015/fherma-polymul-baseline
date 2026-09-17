@@ -1,3 +1,6 @@
+#ifndef FHERMA_COPY_ACKS
+#define FHERMA_COPY_ACKS 1
+#endif
 #ifndef FHERMA_SHUFFLE_TAIL
 #define FHERMA_SHUFFLE_TAIL 1
 #endif
