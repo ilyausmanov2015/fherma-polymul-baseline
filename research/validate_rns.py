@@ -74,7 +74,7 @@ for value in edges+[rng.randrange(-bound,bound+1) for _ in range(10000)]:
 shoup_cases=0
 for p in primes:
     for _ in range(2000):
-        a=rng.randrange(p);w=rng.randrange(p)
+        a=rng.randrange(1<<32);w=rng.randrange(p)
         reciprocal=(w<<32)//p
         approximate=(a*reciprocal)>>32
         r=(a*w-approximate*p)&MASK

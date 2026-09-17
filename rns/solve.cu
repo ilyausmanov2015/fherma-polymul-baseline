@@ -5,7 +5,7 @@
 #define FHERMA_PROFILE 1
 #endif
 #ifndef FHERMA_GRAPH
-#define FHERMA_GRAPH 1
+#define FHERMA_GRAPH (!FHERMA_PROFILE)
 #endif
 #ifndef FHERMA_COPY_THREADS
 #define FHERMA_COPY_THREADS 8
@@ -50,22 +50,22 @@ __device__ uint32_t multiply_mod(uint32_t a,uint32_t b,const SmallMod& modulus) 
     return result>=modulus.p ? result-modulus.p : result;
 }
 __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
-                             const Twiddle* twists,unsigned n,unsigned logn) {
+                             const Twiddle* twists,const Twiddle* powers,unsigned n,unsigned logn) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     unsigned prime_i=blockIdx.y%PrimeCount,poly=blockIdx.y/PrimeCount;
     SmallMod modulus=mods[prime_i];
     const uint32_t* coefficient=input+(poly*n+i)*AbiWords;
-    uint32_t value=0;
-    Twiddle base{modulus.base,modulus.base_shoup};
+    // Shoup accepts any a<2^32: its exact residual is <2p<2^32.
+    // Independent partial sums avoid Horner's 28 dependent multiplies.
+    uint32_t even=0,odd=0;
     #pragma unroll
-    for(int limb=AbiWords-1;limb>=0;--limb) {
-        uint32_t word=coefficient[limb];
-        if(word>=modulus.p) word-=modulus.p;
-        if(word>=modulus.p) word-=modulus.p;
-        value=add_mod(shoup(value,base,modulus.p),word,modulus.p);
+    for(unsigned limb=0;limb<AbiWords;++limb) {
+        uint32_t term=shoup(coefficient[limb],powers[prime_i*AbiWords+limb],modulus.p);
+        if(limb&1) odd=add_mod(odd,term,modulus.p);
+        else even=add_mod(even,term,modulus.p);
     }
-    value=shoup(value,twists[prime_i*n+i],modulus.p);
+    uint32_t value=shoup(add_mod(even,odd,modulus.p),twists[prime_i*n+i],modulus.p);
     ab[blockIdx.y*n+(__brev(i)>>(32-logn))]=value;
 }
 __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
@@ -190,7 +190,7 @@ struct State {
     uint32_t *input=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
     uint32_t *q=nullptr,*product_mod_q=nullptr,*host_input=nullptr,*host_output=nullptr;
     SmallMod* mods=nullptr;
-    Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr,*tail_forward=nullptr,*tail_inverse=nullptr;
+    Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr,*tail_forward=nullptr,*tail_inverse=nullptr,*input_powers=nullptr;
 #if FHERMA_GRAPH
     cudaStream_t stream=nullptr;cudaGraphExec_t graph=nullptr;
 #endif
@@ -207,7 +207,7 @@ struct State {
 #endif
         cudaFree(input);cudaFree(ab);cudaFree(c);cudaFree(bases);cudaFree(scratch);
         cudaFree(q);cudaFree(product_mod_q);cudaFree(mods);cudaFree(forward);cudaFree(inverse);
-        cudaFree(scale);cudaFree(small_forward);cudaFree(small_inverse);cudaFree(tail_forward);cudaFree(tail_inverse);
+        cudaFree(scale);cudaFree(small_forward);cudaFree(small_inverse);cudaFree(tail_forward);cudaFree(tail_inverse);cudaFree(input_powers);
         cudaFreeHost(host_input);cudaFreeHost(host_output);
     }
 };
@@ -225,7 +225,7 @@ template<class T> void upload(T*& destination,const std::vector<T>& source) {
 }
 void launch_rns(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
-    prepare_rns<<<full,128,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.n,s.logn);
+    prepare_rns<<<full,128,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn);
     mark(s,2,stream);
     unsigned first=1;
     if(s.n>=Tile) {
@@ -272,10 +272,11 @@ void* fherma_init(const fherma::Point& p) {
     bool special=delta>0 && delta<0x10000000u && p.q.data[27]==15u;
     for(unsigned k=1;k<27;++k) special=special && p.q.data[k]==0xffffffffu;
     if(!special) throw std::runtime_error("RNS coverage: q=2^868-c, c<2^28");
-    static_assert(!FHERMA_PROFILE || FHERMA_GRAPH,"RNS profiling uses graph events");
+    static_assert(!FHERMA_PROFILE || !FHERMA_GRAPH,"Timing events must run outside graph capture");
     pin_near_gpu();
     auto s=std::make_unique<State>();s->n=p.N;s->logn=__builtin_ctz(p.N);
     auto constants=rns::setup(p.N,p.q.data);
+    upload(s->input_powers,constants.input_powers);
     upload(s->mods,constants.mods);upload(s->bases,constants.bases_mod_q);
     constants.product_mod_q.resize(rns::AccumWords,0);
     upload(s->product_mod_q,constants.product_mod_q);upload(s->q,p.q.data);
@@ -307,10 +308,10 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_input),2*bytes),"pinned RNS inputs");
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_output),bytes),"pinned RNS output");
     std::memset(s->host_input,0,2*bytes);std::memset(s->host_output,0,bytes);
-#if FHERMA_GRAPH
 #if FHERMA_PROFILE
     for(auto& event:s->events) check(cudaEventCreate(&event),"RNS profile event");
 #endif
+#if FHERMA_GRAPH
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
     check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS graph");
     mark(*s,0,s->stream);
@@ -344,7 +345,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_GRAPH
         check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
 #else
+        mark(s,0);
         check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"RNS H2D");
+        mark(s,1);
         launch_rns(s);
 #endif
         output.c.data.reserve(words);
@@ -354,6 +357,8 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         check(cudaStreamSynchronize(s.stream),"RNS output ready");
 #else
         check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"RNS D2H");
+        mark(s,7);
+        check(cudaDeviceSynchronize(),"RNS diagnostic events ready");
 #endif
     } catch(...) {
 #if FHERMA_GRAPH

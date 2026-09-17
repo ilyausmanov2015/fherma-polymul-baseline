@@ -30,4 +30,4 @@ rows.sort(key=lambda r:r.get('started_at') or '')
 (ROOT/'results'/'experiments.json').write_text(json.dumps(rows,indent=2)+'\n')
 for r in rows:
     print(r['commit'][:7],r['id'],r['status'],f"{r['passed']}/{r['cases']}",
-          [p.get('seconds',{}).get('median') for p in r['points']],r['profiles_us'])
+          [(p.get('seconds') or {}).get('median') for p in r['points']],r['profiles_us'])

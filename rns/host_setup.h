@@ -54,7 +54,7 @@ inline Twiddle twiddle(uint32_t value,uint32_t p) {
 }
 struct Setup {
     std::vector<SmallMod> mods;
-    std::vector<Twiddle> forward,inverse,scale,small_forward,small_inverse;
+    std::vector<Twiddle> forward,inverse,scale,small_forward,small_inverse,input_powers;
     Words product,half_ceil,product_mod_q,bases,bases_mod_q;
 };
 inline Setup setup(unsigned n,const Words& q) {
@@ -82,11 +82,17 @@ inline Setup setup(unsigned n,const Words& q) {
     s.product_mod_q=mod_wide(s.product,q);
     s.bases.reserve(PrimeCount*WideWords);
     s.bases_mod_q.reserve(PrimeCount*AccumWords);
+    s.input_powers.resize(PrimeCount*AbiWords);
     s.forward.resize(size_t(PrimeCount)*n);s.inverse.resize(size_t(PrimeCount)*n);
     s.scale.resize(size_t(PrimeCount)*n);
     if(n>=Tile) {s.small_forward.resize(PrimeCount*Tile);s.small_inverse.resize(PrimeCount*Tile);}
     for(unsigned prime_i=0;prime_i<PrimeCount;++prime_i) {
         uint32_t p=s.mods[prime_i].p,remainder=0;
+        uint32_t limb_power=1;
+        for(unsigned limb=0;limb<AbiWords;++limb) {
+            s.input_powers[prime_i*AbiWords+limb]=twiddle(limb_power,p);
+            limb_power=uint64_t(limb_power)*s.mods[prime_i].base%p;
+        }
         auto basis=host_wide::divide_small(s.product,p,&remainder);
         if(remainder) throw std::runtime_error("CRT basis division not exact");
         s.bases.insert(s.bases.end(),basis.begin(),basis.end());
