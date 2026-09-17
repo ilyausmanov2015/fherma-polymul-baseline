@@ -1,3 +1,6 @@
+#ifndef FHERMA_INPUT_COPY_GRAPH
+#define FHERMA_INPUT_COPY_GRAPH 1
+#endif
 #ifndef FHERMA_PIPELINE_PROFILE
 #define FHERMA_PIPELINE_PROFILE 0
 #endif
@@ -1284,6 +1287,7 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments fit the smallest point");
     static_assert(!FHERMA_MAPPED_OUTPUT || FHERMA_PIPELINE_OUTPUT==1,"mapped output waits for the complete CRT kernel");
     static_assert(!FHERMA_OUTPUT_WC || (!FHERMA_OUTPUT_APPEND && !FHERMA_MAPPED_OUTPUT),"WC output uses fenced copies and an explicit device alias if mapped");
+    static_assert(!FHERMA_INPUT_COPY_GRAPH || (!FHERMA_MAPPED_INPUT && !FHERMA_INPUT_GRAPH && FHERMA_PAIRED_INPUT && FHERMA_OVERLAP_PREPARE && FHERMA_PIPELINE_INPUT>1),"per-part copy graph requires paired staged input");
     static_assert(!FHERMA_CRT_OUTPUT_SIGNAL || (FHERMA_NATURAL_INVERSE && FHERMA_OUTPUT_SIGNAL && FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE && !FHERMA_MAPPED_OUTPUT && FHERMA_PIPELINE_OUTPUT>1),"direct CRT signals require natural contiguous output and captured completion");
     static_assert(!(FHERMA_OUTPUT_APPEND && FHERMA_OUTPUT_SPARE),"choose one output construction experiment");
     static_assert(!FHERMA_HARVEY || (Tile==1024 && FHERMA_RNS_RADIX8 && FHERMA_DIF_FORWARD && FHERMA_RNS_TAIL),"Harvey uses natural input and 1024-element radix-8 tiles");
@@ -1434,6 +1438,11 @@ void* fherma_init(const fherma::Point& p) {
     if(s->overlap_input && !s->input_graph) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
             check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS input chunk");
+#if FHERMA_INPUT_COPY_GRAPH
+            size_t begin=size_t(s->n)*AbiWords*part/FHERMA_PIPELINE_INPUT;
+            size_t count=size_t(s->n)*AbiWords/FHERMA_PIPELINE_INPUT;
+            check(cudaMemcpyAsync(s->input+2*begin,s->host_input+2*begin,2*count*4,cudaMemcpyHostToDevice,s->stream),"capture paired input DMA before prepare");
+#endif
 #if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
             check(cudaEventRecordWithFlags(s->prepare_profile[2*part],s->stream,cudaEventRecordExternal),"profile mapped prepare start");
 #endif
@@ -1561,8 +1570,8 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
                 return;
             }
 #endif
-            if(FHERMA_MAPPED_INPUT && s.overlap_input) {
-                check(cudaGraphLaunch(s.prepare_graph[input_part],s.stream),"execute mapped input chunk");
+            if((FHERMA_MAPPED_INPUT || FHERMA_INPUT_COPY_GRAPH) && s.overlap_input) {
+                check(cudaGraphLaunch(s.prepare_graph[input_part],s.stream),"execute prepared input chunk");
                 ++input_part;
                 return;
             }
