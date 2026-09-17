@@ -1,3 +1,17 @@
+#ifndef FHERMA_MONTGOMERY
+#define FHERMA_MONTGOMERY 1
+#endif
+#ifndef FHERMA_SOA
+#define FHERMA_SOA 0
+#endif
+#ifndef FHERMA_PROFILE
+#define FHERMA_PROFILE 1
+#endif
+
+#ifndef FHERMA_TPI
+#define FHERMA_TPI 4
+#endif
+
 // Exact negacyclic NTT baseline. All device modular arithmetic uses cuPQC.
 #include "fherma.h"
 #include "wide_host.h"
@@ -5,19 +19,15 @@
 #include <cuda_runtime.h>
 #include <memory>
 #include <cstdio>
-#ifndef FHERMA_MONTGOMERY
-#define FHERMA_MONTGOMERY 0
-#endif
-#ifndef FHERMA_SOA
-#define FHERMA_SOA 1
-#endif
-#ifndef FHERMA_PROFILE
-#define FHERMA_PROFILE 1
-#endif
 
 namespace {
 constexpr unsigned L=28;
+#if FHERMA_TPI == 1
 using BI=decltype(cupqc::BitWidth<L*32>()+cupqc::SM<800>()+cupqc::Thread());
+#else
+static_assert(FHERMA_MONTGOMERY && !FHERMA_SOA,"cooperative experiment uses Montgomery and native layout");
+using BI=decltype(cupqc::BitWidth<L*32>()+cupqc::SM<800>()+cupqc::Warp()+cupqc::TPI<FHERMA_TPI>());
+#endif
 using Big=typename BI::bigint;
 __device__ Big load_coeff(const uint32_t* p,unsigned i,unsigned n) {
 #if FHERMA_SOA
@@ -94,6 +104,8 @@ struct State {
 void mark(State& s,unsigned i) {
 #if FHERMA_PROFILE
     check(cudaEventRecord(s.events[i]),"profile record");
+#else
+    (void)s; (void)i;
 #endif
 }
 __device__ Big pow_small(Big x,unsigned e,const Mod& q) {
@@ -103,7 +115,7 @@ __device__ Big pow_small(Big x,unsigned e,const Mod& q) {
 }
 __global__ void make_tables(const uint32_t* qp,const uint32_t* roots,
                            uint32_t* twist,uint32_t* inv_twist,uint32_t* scale,unsigned n) {
-    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
     const Mod q(qp,0);
     const Big psi=encode(Big(roots,0),q), invpsi=encode(Big(roots,1),q), invn=encode(Big(roots,2),q);
@@ -113,7 +125,7 @@ __global__ void make_tables(const uint32_t* qp,const uint32_t* roots,
 }
 __global__ void prepare(const uint32_t* input,uint32_t* ab,const uint32_t* twist,
                         const uint32_t* qp,unsigned n,unsigned logn) {
-    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
     unsigned poly=blockIdx.y, j=__brev(i)>>(32-logn);
     const Mod q(qp,0);
@@ -122,7 +134,7 @@ __global__ void prepare(const uint32_t* input,uint32_t* ab,const uint32_t* twist
 }
 __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
                       unsigned n,unsigned half) {
-    unsigned k=blockIdx.x*blockDim.x+threadIdx.x;
+    unsigned k=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(k>=n/2) return;
     unsigned j=k&(half-1), i=2*(k-j)+j;
     values+=blockIdx.y*n*L;
@@ -133,14 +145,14 @@ __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
 }
 __global__ void product(const uint32_t* ab,uint32_t* c,const uint32_t* qp,
                         unsigned n,unsigned logn) {
-    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
     const Mod q(qp,0);
     const Big a=load_coeff(ab,i,n), b=load_coeff(ab+n*L,i,n);
     store_coeff(multiply(a,b,q),c,__brev(i)>>(32-logn),n);
 }
 __global__ void finish(const uint32_t* c,uint32_t* out,const uint32_t* scale,const uint32_t* qp,unsigned n) {
-    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
     const Mod q(qp,0);
     const Big x=load_coeff(c,i,n), s=load_coeff(scale,i,n);
@@ -167,7 +179,7 @@ void* fherma_init(const fherma::Point& p) {
     alloc(&s->scale,p.N); alloc(&s->input,2*p.N); alloc(&s->ab,2*p.N); alloc(&s->c,p.N);
     check(cudaMemcpy(s->q,p.q.data.data(),L*4,cudaMemcpyHostToDevice),"copy q");
     check(cudaMemcpy(s->roots,packed.data(),3*L*4,cudaMemcpyHostToDevice),"copy roots");
-    make_tables<<<(p.N+127)/128,128>>>(s->q,s->roots,s->twist,s->inv_twist,s->scale,p.N);
+    make_tables<<<(p.N*FHERMA_TPI+127)/128,128>>>(s->q,s->roots,s->twist,s->inv_twist,s->scale,p.N);
     check(cudaGetLastError(),"table launch"); check(cudaDeviceSynchronize(),"table setup");
 #if FHERMA_PROFILE
     for(auto& e:s->events) check(cudaEventCreate(&e),"profile create");
@@ -181,7 +193,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     check(cudaMemcpy(s.input,in.a.data.data(),bytes,cudaMemcpyHostToDevice),"copy a");
     check(cudaMemcpy(s.input+words,in.b.data.data(),bytes,cudaMemcpyHostToDevice),"copy b");
     mark(s,1);
-    dim3 full((s.n+127)/128,2), halves((s.n/2+127)/128,2);
+    dim3 full((s.n*FHERMA_TPI+127)/128,2), halves((s.n/2*FHERMA_TPI+127)/128,2);
     prepare<<<full,128>>>(s.input,s.ab,s.twist,s.q,s.n,s.logn);
     mark(s,2);
     for(unsigned half=1;half<s.n;half*=2) stage<<<halves,128>>>(s.ab,s.twist,s.q,s.n,half);

@@ -5,6 +5,9 @@
 #include <gmpxx.h>
 #include <cstdlib>
 #include <cstring>
+#ifndef FHERMA_TPI
+#define FHERMA_TPI 1
+#endif
 #define __global__
 #define __device__
 struct dim3 { unsigned x,y,z; dim3(unsigned x_=1,unsigned y_=1,unsigned z_=1):x(x_),y(y_),z(z_){} };
@@ -16,7 +19,7 @@ template<class F> void emulate_launch(dim3 grid,dim3 threads,F f) {
     blockDim=threads;
     for(blockIdx.y=0;blockIdx.y<grid.y;++blockIdx.y)
         for(blockIdx.x=0;blockIdx.x<grid.x;++blockIdx.x)
-            for(threadIdx.x=0;threadIdx.x<threads.x;++threadIdx.x) f();
+            for(threadIdx.x=0;threadIdx.x<threads.x;threadIdx.x+=FHERMA_TPI) f();
 }
 using cudaError_t=int;
 constexpr int cudaSuccess=0,cudaMemcpyHostToDevice=1,cudaMemcpyDeviceToHost=2;
@@ -30,6 +33,8 @@ namespace cupqc {
 template<unsigned N> struct BitWidth {};
 template<unsigned N> struct SM {};
 struct Thread {};
+struct Warp {};
+template<unsigned N> struct TPI {};
 struct EmulatedWide;
 struct EmulatedBig {
     uint32_t limbs[28]{};
@@ -90,4 +95,6 @@ inline EmulatedWide EmulatedBig::mul_wide(const EmulatedBig& b) const {
 struct Descriptor { using bigint=EmulatedBig; using modulus=EmulatedBig; };
 template<unsigned W,unsigned S> Descriptor operator+(BitWidth<W>,SM<S>){return {};}
 inline Descriptor operator+(Descriptor,Thread){return {};}
+inline Descriptor operator+(Descriptor,Warp){return {};}
+template<unsigned N> Descriptor operator+(Descriptor,TPI<N>){return {};}
 }
