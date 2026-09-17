@@ -16,6 +16,10 @@
 #define FHERMA_COPY_THREADS 4
 #endif
 
+#ifndef FHERMA_STREAM_OUTPUT
+#define FHERMA_STREAM_OUTPUT 1
+#endif
+
 #ifndef FHERMA_SPIN_COPY
 #define FHERMA_SPIN_COPY 0
 #endif
@@ -56,7 +60,11 @@ class HostCopyPool {
             host_copy_bytes(dest+begin,source+begin,end-begin);
         } else {
             size_t begin=job.bytes*rank/Threads,end=job.bytes*(rank+1)/Threads;
+#if FHERMA_STREAM_OUTPUT
             host_copy_bytes(job.out+begin,job.a+begin,end-begin);
+#else
+            std::memcpy(job.out+begin,job.a+begin,end-begin);
+#endif
         }
     }
     void worker(unsigned rank) {
