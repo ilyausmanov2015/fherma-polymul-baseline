@@ -1,3 +1,6 @@
+#ifndef FHERMA_RNS_FUSED_TRANSPOSE
+#define FHERMA_RNS_FUSED_TRANSPOSE 1
+#endif
 #ifndef FHERMA_PIPELINE_INPUT
 #define FHERMA_PIPELINE_INPUT 4
 #endif
@@ -198,6 +201,29 @@ __global__ void tail_rns(uint32_t* values,const SmallMod* mods,const Twiddle* ta
     }
     values[t]=tile[t];values[t+128]=tile[t+128];
 }
+// Read eight adjacent columns directly, then do all five tail stages in
+// shared memory. Each input warp reads four aligned 32-byte segments.
+__global__ void fused_tail_rns(const uint32_t* source,uint32_t* destination,const SmallMod* mods,
+                               const Twiddle* tables,unsigned n) {
+    __shared__ uint32_t tile[8*33];
+    unsigned t=threadIdx.x,prime_i=blockIdx.y%PrimeCount,column_base=blockIdx.x*8;
+    source+=blockIdx.y*n;destination+=blockIdx.y*n+blockIdx.x*256;tables+=prime_i*n;
+    #pragma unroll
+    for(unsigned index=t;index<256;index+=128) {
+        unsigned row=index/8,column=index%8;
+        tile[column*33+row]=source[row*1024+column_base+column];
+    }
+    __syncthreads();
+    unsigned column=column_base+t/16,k=t%16,offset=(t/16)*33;
+    uint32_t p=mods[prime_i].p;
+    for(unsigned half=1;half<32;half*=2) {
+        unsigned j=k&(half-1),i=offset+2*(k-j)+j;
+        uint32_t u=tile[i],v=shoup(tile[i+half],tables[1024*(half-1)+column*half+j],p);
+        tile[i]=add_mod(u,v,p);tile[i+half]=sub_mod(u,v,p);
+        __syncthreads();
+    }
+    destination[2*t]=tile[offset+2*k];destination[2*t+1]=tile[offset+2*k+1];
+}
 __device__ unsigned natural_index(unsigned i,unsigned n) {
     return FHERMA_RNS_TAIL && n==32768 ? ((i&31)*1024+(i>>5)) : i;
 }
@@ -355,8 +381,12 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     uint32_t* forward_values=s.ab;
     if(FHERMA_RNS_TAIL && s.n==32768) {
         dim3 transposes(32,2*PrimeCount),tails(128,2*PrimeCount);
-        transpose_rns<<<transposes,256,0,stream>>>(s.ab,s.scratch,s.n);
-        tail_rns<<<tails,128,0,stream>>>(s.scratch,s.mods,s.tail_forward,s.n);
+        if(FHERMA_RNS_FUSED_TRANSPOSE) {
+            fused_tail_rns<<<tails,128,0,stream>>>(s.ab,s.scratch,s.mods,s.tail_forward,s.n);
+        } else {
+            transpose_rns<<<transposes,256,0,stream>>>(s.ab,s.scratch,s.n);
+            tail_rns<<<tails,128,0,stream>>>(s.scratch,s.mods,s.tail_forward,s.n);
+        }
         forward_values=s.scratch;
     } else for(unsigned h=first;h<s.n;h*=2)
         stage_rns<<<half,128,0,stream>>>(s.ab,s.mods,s.forward,s.n,h,s.n/h);
@@ -371,8 +401,12 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     uint32_t* inverse_values=s.c;
     if(FHERMA_RNS_TAIL && s.n==32768) {
         dim3 transposes(32,PrimeCount),tails(128,PrimeCount);
-        transpose_rns<<<transposes,256,0,stream>>>(s.c,s.ab,s.n);
-        tail_rns<<<tails,128,0,stream>>>(s.ab,s.mods,s.tail_inverse,s.n);
+        if(FHERMA_RNS_FUSED_TRANSPOSE) {
+            fused_tail_rns<<<tails,128,0,stream>>>(s.c,s.ab,s.mods,s.tail_inverse,s.n);
+        } else {
+            transpose_rns<<<transposes,256,0,stream>>>(s.c,s.ab,s.n);
+            tail_rns<<<tails,128,0,stream>>>(s.ab,s.mods,s.tail_inverse,s.n);
+        }
         inverse_values=s.ab;
     } else for(unsigned h=first;h<s.n;h*=2)
         stage_rns<<<inverse_half,128,0,stream>>>(s.c,s.mods,s.inverse,s.n,h,s.n/h);
