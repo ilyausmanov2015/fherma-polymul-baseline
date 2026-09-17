@@ -34,9 +34,9 @@ for m in reversed(matches):
     decl=source[m.start():start].replace('__global__ void','EmulatedKernel')
     source=source[:m.start()]+decl+body+'co_return;\n}'+source[end:]
 source, count = re.subn(
-    r'(\w+)<<<([^,<>]+),\s*([^<>]+)>>>\(([^;]+)\);',
+    r'(\w+(?:<(?:true|false)>)?)<<<([^,<>]+),\s*([^<>]+)>>>\(([^;]+)\);',
     lambda m: 'emulate_launch('+m[2]+','+m[3].split(',')[0]+',[&] { return '+m[1]+'('+m[4]+'); });', source)
-expected={'rns/solve.cu':20,'quartic/solve.cu':17}.get(args.source,14)
+expected={'rns/solve.cu':20,'quartic/solve.cu':18}.get(args.source,14)
 assert count == expected, f'Expected {expected} CUDA launch sites, saw {count}; update test adapter explicitly.'
 assert '<<<' not in source
 (BUILD / 'solve_emulated.cpp').write_text(source)

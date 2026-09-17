@@ -1,7 +1,7 @@
 #pragma once
 #include "rns/host_setup.h"
 #ifndef FHERMA_QUARTIC_TILE
-#define FHERMA_QUARTIC_TILE 4096
+#define FHERMA_QUARTIC_TILE 1024
 #endif
 namespace quartic {
 constexpr unsigned ModCount=16,Components=4,PrimeCount=ModCount*Components;

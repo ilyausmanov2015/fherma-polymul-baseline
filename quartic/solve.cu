@@ -1,3 +1,6 @@
+#ifndef FHERMA_FUSED_PRODUCT
+#define FHERMA_FUSED_PRODUCT 1
+#endif
 #ifndef FHERMA_SHARED_SWIZZLE
 #define FHERMA_SHARED_SWIZZLE 1
 #endif
@@ -176,15 +179,25 @@ __device__ inline unsigned small_index(unsigned x) {
     return x;
 #endif
 }
-__global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
+template<bool Product> __device__ inline uint32_t small_value(
+    const uint32_t* values,const uint32_t* paired,unsigned local,unsigned begin,unsigned channel,
+    unsigned n,unsigned logn,const SmallMod& modulus) {
+    if constexpr(!Product) return values[local];
+    else {
+        unsigned frequency=__brev(begin+local)>>(32-logn);
+        unsigned index=FHERMA_RNS_TAIL && n==32768 ? (frequency%Tile)*TailRows+frequency/Tile : frequency;
+        return multiply_mod(paired[channel*n+index],paired[(PrimeCount+channel)*n+index],modulus);
+    }
+}
+template<bool Product> __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n,const uint32_t* paired=nullptr,unsigned logn=0) {
     __shared__ uint32_t tile[Tile];
     unsigned t=threadIdx.x,prime_i=blockIdx.y%ModCount;
     values+=blockIdx.y*n+blockIdx.x*Tile;
     tables+=prime_i*Tile;
-    uint32_t p=mods[prime_i].p;
+    SmallMod modulus=mods[prime_i];uint32_t p=modulus.p;
 #if FHERMA_RNS_RADIX8
     #pragma unroll
-    for(unsigned k=0;k<8;++k) tile[small_index(t+k*Tile/8)]=values[t+k*Tile/8];
+    for(unsigned k=0;k<8;++k) tile[small_index(t+k*Tile/8)]=small_value<Product>(values,paired,t+k*Tile/8,blockIdx.x*Tile,blockIdx.y,n,logn,modulus);
     __syncthreads();
     for(unsigned half=1;half*8<=Tile;half*=8) {
         unsigned j=t&(half-1),i=8*(t-j)+j;uint32_t x[8];
@@ -224,7 +237,7 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
     }
 #elif FHERMA_RNS_RADIX4
     #pragma unroll
-    for(unsigned k=0;k<4;++k) tile[small_index(t+k*Tile/4)]=values[t+k*Tile/4];
+    for(unsigned k=0;k<4;++k) tile[small_index(t+k*Tile/4)]=small_value<Product>(values,paired,t+k*Tile/4,blockIdx.x*Tile,blockIdx.y,n,logn,modulus);
     __syncthreads();
     for(unsigned half=1;half<Tile;half*=4) {
         unsigned j=t&(half-1),i=4*(t-j)+j;
@@ -247,7 +260,7 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
         }
     }
 #else
-    tile[small_index(t)]=values[t];tile[small_index(t+Tile/2)]=values[t+Tile/2];
+    tile[small_index(t)]=small_value<Product>(values,paired,t,blockIdx.x*Tile,blockIdx.y,n,logn,modulus);tile[small_index(t+Tile/2)]=small_value<Product>(values,paired,t+Tile/2,blockIdx.x*Tile,blockIdx.y,n,logn,modulus);
     __syncthreads();
     unsigned stride=Tile;
     for(unsigned half=1;half<Tile;half*=2,stride>>=1) {
@@ -493,7 +506,7 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     unsigned first=1;
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,2*PrimeCount);
-        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(prepared,s.mods,s.small_forward,s.n);
+        small_rns<false><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(prepared,s.mods,s.small_forward,s.n);
         first=Tile;
     }
     uint32_t* forward_values=prepared;
@@ -511,11 +524,15 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
         stage_rns<<<half,128,0,stream>>>(s.ab,s.mods,s.forward,s.n,h,s.n/h);
     mark(s,3,stream);
     dim3 inverse_full(full.x,PrimeCount),inverse_half(half.x,PrimeCount);
-    product_rns<<<inverse_full,128,0,stream>>>(forward_values,s.c,s.mods,s.n,s.logn);
+    bool fused_product=FHERMA_FUSED_PRODUCT && s.n>=Tile;
+    if(!fused_product) product_rns<<<inverse_full,128,0,stream>>>(forward_values,s.c,s.mods,s.n,s.logn);
     mark(s,4,stream);
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,PrimeCount);
-        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
+        if(fused_product)
+            small_rns<true><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n,forward_values,s.logn);
+        else
+            small_rns<false><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
     }
     uint32_t* inverse_values=s.c;
     if(FHERMA_RNS_TAIL && s.n==32768) {
