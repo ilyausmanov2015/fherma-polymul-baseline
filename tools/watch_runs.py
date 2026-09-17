@@ -28,6 +28,12 @@ def main():
                     entries = [e for e in entries if e['submission']['commit'].startswith(args.commit)]
                 ids = [r['id'] for e in entries for r in e.get('runs', [])]
                 ids = ids[:1]
+                if not ids:
+                    line = json.dumps({'waiting_jobs': [{k:j.get(k) for k in ['id','status','created_at']}
+                        for e in entries for j in e.get('jobs',[])]})
+                    if line != last:
+                        print(line, flush=True)
+                        last = line
             done = False
             for rid in ids:
                 result = api._request('GET', '/runs/' + rid)

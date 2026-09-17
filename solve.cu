@@ -5,7 +5,7 @@
 #include <cuda_runtime.h>
 #include <memory>
 #ifndef FHERMA_MONTGOMERY
-#define FHERMA_MONTGOMERY 1
+#define FHERMA_MONTGOMERY 0
 #endif
 
 namespace {
@@ -23,20 +23,30 @@ __device__ Big encode(const Big& x,const Mod&) { return x; }
 __device__ Big decode(const Big& x,const Mod&) { return x; }
 // For q = 2^868-c, c < 2^28, a full product folds twice without division.
 // At each fold all intermediates fit the 896-bit cuPQC storage width.
-// q is supplied at setup; other moduli retain the general implementation.
+// The modulus shape is checked once on the host during setup.
 __device__ Big multiply(const Big& a,const Big& b,const Big& q) {
     const uint32_t c=uint32_t(0)-q[0];
-    bool special=c>0 && c<0x10000000u && q[27]==15u;
-    #pragma unroll
-    for(unsigned k=1;k<27;++k) special=special && q[k]==0xffffffffu;
-    if(!special) return a.mul_mod(b,q);
     auto p=a.mul_wide(b);
-    Big low=(p.lo<<28)>>28;
-    Big high=(p.lo>>868)|(p.hi<<28);
-    Big t=low+high.mul_scalar(c);
-    Big r=((t<<28)>>28)+(t>>868).mul_scalar(c);
-    if(r>=q) r=r-q;
-    return r;
+    // Extract z>>868 before overwriting the low half. Coefficients use
+    // 27 full words and four bits of word 27.
+    uint32_t h0=(p.lo[27]>>4)|(p.hi[0]<<28);
+    uint64_t carry=0;
+    #pragma unroll
+    for(unsigned k=0;k<28;++k) {
+        uint32_t h=k==0 ? h0 : ((p.hi[k-1]>>4)|(p.hi[k]<<28));
+        uint32_t low=k==27 ? (p.lo[k]&15u) : uint32_t(p.lo[k]);
+        uint64_t v=uint64_t(h)*c+low+carry;
+        p.lo[k]=uint32_t(v); carry=v>>32;
+    }
+    carry=uint64_t(p.lo[27]>>4)*c;
+    p.lo[27]=p.lo[27]&15u;
+    #pragma unroll
+    for(unsigned k=0;k<28;++k) {
+        uint64_t v=uint64_t(p.lo[k])+carry;
+        p.lo[k]=uint32_t(v); carry=v>>32;
+    }
+    if(p.lo>=q) p.lo=p.lo-q;
+    return p.lo;
 }
 #endif
 void check(cudaError_t e,const char* op) {
@@ -102,6 +112,12 @@ __global__ void finish(uint32_t* c,const uint32_t* scale,const uint32_t* qp,unsi
 void* fherma_init(const fherma::Point& p) {
     if(p.N<2 || (p.N&(p.N-1)) || p.N>32768 || p.W!=868 || p.L!=L || p.q.data.size()!=L)
         throw std::runtime_error("coverage: power-of-two 2<=N<=32768, W=868, L=28");
+#if !FHERMA_MONTGOMERY
+    uint32_t delta=uint32_t(0)-p.q.data[0];
+    bool special=delta>0 && delta<0x10000000u && p.q.data[27]==15u;
+    for(unsigned k=1;k<27;++k) special=special && p.q.data[k]==0xffffffffu;
+    if(!special) throw std::runtime_error("coverage: q=2^868-c with 0<c<2^28");
+#endif
     auto s=std::make_unique<State>(); s->n=p.N; s->logn=__builtin_ctz(p.N);
     auto root=host_wide::roots(p.q.data,p.N);
     std::vector<uint32_t> packed=root.psi;

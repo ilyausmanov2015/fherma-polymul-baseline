@@ -32,53 +32,59 @@ template<unsigned N> struct SM {};
 struct Thread {};
 struct EmulatedWide;
 struct EmulatedBig {
-    mpz_class v;
-    explicit EmulatedBig(uint32_t x):v(x){}
-    EmulatedBig(const uint32_t* p,unsigned i) { mpz_import(v.get_mpz_t(),28,-1,4,0,0,p+i*28); }
-    explicit EmulatedBig(mpz_class x):v(std::move(x)){}
+    uint32_t limbs[28]{};
+    explicit EmulatedBig(uint32_t x) { limbs[0]=x; }
+    EmulatedBig(const uint32_t* p,unsigned i) { std::memcpy(limbs,p+i*28,112); }
+    explicit EmulatedBig(mpz_class x) {
+        x &= mask(); mpz_export(limbs,nullptr,-1,4,0,0,x.get_mpz_t());
+    }
+    mpz_class value() const {
+        mpz_class x; mpz_import(x.get_mpz_t(),28,-1,4,0,0,limbs); return x;
+    }
     static mpz_class mask() { return (mpz_class(1)<<896)-1; }
-    uint32_t operator[](unsigned k) const { mpz_class x=v>>(k*32); return uint32_t(x.get_ui()); }
-    EmulatedBig operator<<(unsigned n) const { return EmulatedBig(mpz_class((v<<n)&mask())); }
-    EmulatedBig operator>>(unsigned n) const { return EmulatedBig(mpz_class(v>>n)); }
-    EmulatedBig operator|(const EmulatedBig& b) const { return EmulatedBig(mpz_class(v|b.v)); }
-    EmulatedBig operator+(const EmulatedBig& b) const { return EmulatedBig(mpz_class((v+b.v)&mask())); }
-    EmulatedBig operator-(const EmulatedBig& b) const { return EmulatedBig(mpz_class((v-b.v)&mask())); }
-    bool operator>=(const EmulatedBig& b) const { return v>=b.v; }
-    EmulatedBig mul_scalar(uint32_t b) const { return EmulatedBig(mpz_class((v*b)&mask())); }
+    const uint32_t& operator[](unsigned k) const { return limbs[k]; }
+    uint32_t& operator[](unsigned k) { return limbs[k]; }
+    EmulatedBig operator<<(unsigned n) const { return EmulatedBig(mpz_class((value()<<n)&mask())); }
+    EmulatedBig operator>>(unsigned n) const { return EmulatedBig(mpz_class(value()>>n)); }
+    EmulatedBig operator|(const EmulatedBig& b) const { return EmulatedBig(mpz_class(value()|b.value())); }
+    EmulatedBig operator+(const EmulatedBig& b) const { return EmulatedBig(mpz_class((value()+b.value())&mask())); }
+    EmulatedBig operator-(const EmulatedBig& b) const { return EmulatedBig(mpz_class((value()-b.value())&mask())); }
+    bool operator>=(const EmulatedBig& b) const { return value()>=b.value(); }
+    EmulatedBig mul_scalar(uint32_t b) const { return EmulatedBig(mpz_class((value()*b)&mask())); }
     EmulatedWide mul_wide(const EmulatedBig& b) const;
     static const mpz_class& rinv(const EmulatedBig& q) {
         static mpz_class previous, inverse;
-        if(previous!=q.v) {
-            previous=q.v; mpz_class r=mpz_class(1)<<896;
-            mpz_invert(inverse.get_mpz_t(),r.get_mpz_t(),q.v.get_mpz_t());
+        if(previous!=q.value()) {
+            previous=q.value(); mpz_class r=mpz_class(1)<<896;
+            mpz_invert(inverse.get_mpz_t(),r.get_mpz_t(),q.value().get_mpz_t());
         }
         return inverse;
     }
     EmulatedBig to_montgomery(const EmulatedBig& q) const {
-        return EmulatedBig(mpz_class((v<<896)%q.v));
+        return EmulatedBig(mpz_class((value()<<896)%q.value()));
     }
     EmulatedBig from_montgomery(const EmulatedBig& q) const {
-        return EmulatedBig(mpz_class(v*rinv(q)%q.v));
+        return EmulatedBig(mpz_class(value()*rinv(q)%q.value()));
     }
     EmulatedBig mul_montgomery(const EmulatedBig& b,const EmulatedBig& q) const {
-        return EmulatedBig(mpz_class(v*b.v*rinv(q)%q.v));
+        return EmulatedBig(mpz_class(value()*b.value()*rinv(q)%q.value()));
     }
     void store(uint32_t* p,unsigned i) const {
-        std::memset(p+i*28,0,112); mpz_export(p+i*28,nullptr,-1,4,0,0,v.get_mpz_t());
+        std::memcpy(p+i*28,limbs,112);
     }
     EmulatedBig mul_mod(const EmulatedBig& b,const EmulatedBig& q) const {
-        return EmulatedBig(mpz_class((v*b.v)%q.v));
+        return EmulatedBig(mpz_class((value()*b.value())%q.value()));
     }
     EmulatedBig add_mod(const EmulatedBig& b,const EmulatedBig& q) const {
-        return EmulatedBig(mpz_class((v+b.v)%q.v));
+        return EmulatedBig(mpz_class((value()+b.value())%q.value()));
     }
     EmulatedBig sub_mod(const EmulatedBig& b,const EmulatedBig& q) const {
-        return EmulatedBig(mpz_class((v-b.v+q.v)%q.v));
+        return EmulatedBig(mpz_class((value()-b.value()+q.value())%q.value()));
     }
 };
 struct EmulatedWide { EmulatedBig lo,hi; };
 inline EmulatedWide EmulatedBig::mul_wide(const EmulatedBig& b) const {
-    mpz_class p=v*b.v;
+    mpz_class p=value()*b.value();
     return {EmulatedBig(mpz_class(p&mask())),EmulatedBig(mpz_class(p>>896))};
 }
 struct Descriptor { using bigint=EmulatedBig; using modulus=EmulatedBig; };
