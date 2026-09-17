@@ -1,3 +1,9 @@
+#ifndef FHERMA_PIPELINE_INPUT
+#define FHERMA_PIPELINE_INPUT 4
+#endif
+#ifndef FHERMA_PIPELINE_OUTPUT
+#define FHERMA_PIPELINE_OUTPUT 4
+#endif
 #ifndef FHERMA_RNS_RADIX4
 #define FHERMA_RNS_RADIX4 1
 #endif
@@ -11,7 +17,7 @@
 #define FHERMA_RNS_TAIL 1
 #endif
 #ifndef FHERMA_PROFILE
-#define FHERMA_PROFILE 1
+#define FHERMA_PROFILE 0
 #endif
 #ifndef FHERMA_GRAPH
 #define FHERMA_GRAPH 1
@@ -31,6 +37,7 @@
 #include <cuda_runtime.h>
 #include "host_affinity.h"
 #include "host_copy_pool.h"
+#include "input_pipeline.h"
 #include <memory>
 #include <cstring>
 #include <chrono>
@@ -286,6 +293,9 @@ struct State {
     Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr,*tail_forward=nullptr,*tail_inverse=nullptr,*input_powers=nullptr;
 #if FHERMA_GRAPH
     cudaStream_t stream=nullptr;cudaGraphExec_t graph=nullptr;
+#if FHERMA_PIPELINE_OUTPUT>1
+    cudaEvent_t output_ready[FHERMA_PIPELINE_OUTPUT]{};
+#endif
 #endif
 #if FHERMA_PROFILE
     cudaEvent_t events[8]{};
@@ -294,6 +304,9 @@ struct State {
 #if FHERMA_GRAPH
         if(graph) cudaGraphExecDestroy(graph);
         if(stream) cudaStreamDestroy(stream);
+#if FHERMA_PIPELINE_OUTPUT>1
+        for(auto event:output_ready) if(event) cudaEventDestroy(event);
+#endif
 #endif
 #if FHERMA_PROFILE
         for(auto event:events) if(event) cudaEventDestroy(event);
@@ -379,6 +392,9 @@ void* fherma_init(const fherma::Point& p) {
     bool special=delta>0 && delta<0x10000000u && p.q.data[27]==15u;
     for(unsigned k=1;k<27;++k) special=special && p.q.data[k]==0xffffffffu;
     if(!special) throw std::runtime_error("RNS coverage: q=2^868-c, c<2^28");
+    static_assert(!FHERMA_PROFILE || (FHERMA_PIPELINE_INPUT<=1 && FHERMA_PIPELINE_OUTPUT<=1),
+                  "profile arithmetic separately from overlapped host transfers");
+    static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments fit the smallest point");
     pin_near_gpu();
     auto s=std::make_unique<State>();s->n=p.N;s->logn=__builtin_ctz(p.N);
     auto constants=rns::setup(p.N,p.q.data);
@@ -419,13 +435,20 @@ void* fherma_init(const fherma::Point& p) {
     for(auto& event:s->events) check(cudaEventCreate(&event),"RNS profile event");
 #endif
 #if FHERMA_GRAPH
+#if FHERMA_PIPELINE_OUTPUT>1
+    for(auto& event:s->output_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"RNS output segment event");
+#endif
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
     check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS graph");
     mark(*s,0,s->stream);
+#if FHERMA_PIPELINE_INPUT<=1
     check(cudaMemcpyAsync(s->input,s->host_input,2*bytes,cudaMemcpyHostToDevice,s->stream),"capture RNS H2D");
+#endif
     mark(*s,1,s->stream);
     launch_rns(*s,s->stream);
+#if FHERMA_PIPELINE_OUTPUT<=1
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture RNS D2H");
+#endif
     mark(*s,7,s->stream);
     cudaGraph_t definition=nullptr;
     check(cudaStreamEndCapture(s->stream,&definition),"finish RNS capture");
@@ -440,17 +463,32 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     auto& s=*static_cast<State*>(opaque);
     size_t words=size_t(s.n)*rns::AbiWords,bytes=words*4;
     if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
+    try {
 #if FHERMA_PROFILE
     auto pack_start=std::chrono::steady_clock::now();
 #endif
+#if FHERMA_GRAPH && FHERMA_PIPELINE_INPUT>1
+    copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,input.a.data.data(),input.b.data.data(),words,
+        [&](size_t begin,const uint32_t* a,const uint32_t* b,size_t count) {
+            check(cudaMemcpyAsync(s.input+begin,a,count*4,cudaMemcpyHostToDevice,s.stream),"RNS pipeline A H2D");
+            check(cudaMemcpyAsync(s.input+words+begin,b,count*4,cudaMemcpyHostToDevice,s.stream),"RNS pipeline B H2D");
+        });
+#else
     s.copy.inputs(s.host_input,input.a.data.data(),input.b.data.data(),bytes);
+#endif
 #if FHERMA_PROFILE
     auto pack_end=std::chrono::steady_clock::now();
 #endif
     fherma::Outputs output;output.c.shape={s.n,rns::AbiWords};
-    try {
 #if FHERMA_GRAPH
         check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
+#if FHERMA_PIPELINE_OUTPUT>1
+        for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+            size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
+            check(cudaMemcpyAsync(s.host_output+begin,s.input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s.stream),"RNS pipeline D2H");
+            check(cudaEventRecord(s.output_ready[part],s.stream),"record RNS output ready");
+        }
+#endif
 #else
         mark(s,0);
         check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"RNS H2D");
@@ -460,25 +498,27 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         output.c.data.reserve(words);
         s.copy.prefault(output.c.data.data(),bytes);
         output.c.data.resize(words);
-#if FHERMA_GRAPH
+#if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
+        check(cudaEventSynchronize(s.output_ready[0]),"first RNS output segment ready");
+#elif FHERMA_GRAPH
         check(cudaStreamSynchronize(s.stream),"RNS output ready");
 #else
         check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"RNS D2H");
         mark(s,7);
         check(cudaDeviceSynchronize(),"RNS diagnostic events ready");
 #endif
-    } catch(...) {
-#if FHERMA_GRAPH
-        cudaStreamSynchronize(s.stream);
-#else
-        cudaDeviceSynchronize();
-#endif
-        throw;
-    }
 #if FHERMA_PROFILE
     auto unpack_start=std::chrono::steady_clock::now();
 #endif
+#if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
+    for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+        check(cudaEventSynchronize(s.output_ready[part]),"RNS output segment ready");
+        size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
+        s.copy.output(output.c.data.data()+begin,s.host_output+begin,(end-begin)*4);
+    }
+#else
     s.copy.output(output.c.data.data(),s.host_output,bytes);
+#endif
 #if FHERMA_PROFILE
     auto unpack_end=std::chrono::steady_clock::now();
     const char* names[]={"h2d","prepare","forward","product","inverse","finish","d2h"};
@@ -498,5 +538,13 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     std::fprintf(stderr,"\nHOST_US pack=%.3f unpack=%.3f\n",us(pack_start,pack_end),us(unpack_start,unpack_end));
 #endif
     return output;
+    } catch(...) {
+#if FHERMA_GRAPH
+        cudaStreamSynchronize(s.stream);
+#else
+        cudaDeviceSynchronize();
+#endif
+        throw;
+    }
 }
 void fherma_free(void* state) { delete static_cast<State*>(state); }
