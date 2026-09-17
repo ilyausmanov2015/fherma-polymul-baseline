@@ -1280,7 +1280,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         auto alloc_end=std::chrono::steady_clock::now();
 #endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
+#if !FHERMA_OUTPUT_WORKER_PIPELINE
         wait_output_part(s,0);
+#endif
 #elif FHERMA_GRAPH
         check(cudaStreamSynchronize(s.stream),"RNS output ready");
 #else
