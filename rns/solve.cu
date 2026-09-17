@@ -1,3 +1,6 @@
+#ifndef FHERMA_RNS_TAIL
+#define FHERMA_RNS_TAIL 1
+#endif
 #ifndef FHERMA_PROFILE
 #define FHERMA_PROFILE 1
 #endif
@@ -92,11 +95,40 @@ __global__ void stage_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
     uint32_t u=values[i],v=shoup(values[i+half],tables[prime_i*n+j*stride],p);
     values[i]=add_mod(u,v,p);values[i+half]=sub_mod(u,v,p);
 }
+// [prime][32][1024] -> [prime][1024][32], padded shared transpose.
+__global__ void transpose_rns(const uint32_t* source,uint32_t* destination,unsigned n) {
+    __shared__ uint32_t tile[32*33];
+    unsigned x=threadIdx.x&31,y=threadIdx.x>>5,column=blockIdx.x*32;
+    source+=blockIdx.y*n;destination+=blockIdx.y*n;
+    for(unsigned dy=0;dy<32;dy+=8) tile[(y+dy)*33+x]=source[(y+dy)*1024+column+x];
+    __syncthreads();
+    for(unsigned dy=0;dy<32;dy+=8) destination[(column+y+dy)*32+x]=tile[x*33+y+dy];
+}
+__global__ void tail_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
+    __shared__ uint32_t tile[256];
+    unsigned t=threadIdx.x,prime_i=blockIdx.y%PrimeCount;
+    unsigned column=blockIdx.x*8+t/16,k=t%16,offset=(t/16)*32;
+    values+=blockIdx.y*n+blockIdx.x*256;tables+=prime_i*n;
+    uint32_t p=mods[prime_i].p;
+    tile[t]=values[t];tile[t+128]=values[t+128];
+    __syncthreads();
+    for(unsigned half=1;half<32;half*=2) {
+        unsigned j=k&(half-1),i=offset+2*(k-j)+j;
+        uint32_t u=tile[i],v=shoup(tile[i+half],tables[1024*(half-1)+column*half+j],p);
+        tile[i]=add_mod(u,v,p);tile[i+half]=sub_mod(u,v,p);
+        __syncthreads();
+    }
+    values[t]=tile[t];values[t+128]=tile[t+128];
+}
+__device__ unsigned frequency_index(unsigned i,unsigned n) {
+    return FHERMA_RNS_TAIL && n==32768 ? ((i&1023)*32+(i>>10)) : i;
+}
 __global__ void product_rns(const uint32_t* ab,uint32_t* c,const SmallMod* mods,unsigned n,unsigned logn) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     unsigned prime_i=blockIdx.y;
-    uint32_t a=ab[prime_i*n+i],b=ab[(PrimeCount+prime_i)*n+i];
+    unsigned source=frequency_index(i,n);
+    uint32_t a=ab[prime_i*n+source],b=ab[(PrimeCount+prime_i)*n+source];
     c[prime_i*n+(__brev(i)>>(32-logn))]=multiply_mod(a,b,mods[prime_i]);
 }
 // Sum(t_i * (M_i mod q)) is below 57*2^31*q (< 2^905).
@@ -135,7 +167,7 @@ __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const 
     for(unsigned prime_i=0;prime_i<PrimeCount;++prime_i) {
         SmallMod modulus=mods[prime_i];
         // The scale already contains inverse(P/pi mod pi).
-        uint32_t t=shoup(residues[prime_i*n+i],scales[prime_i*n+i],modulus.p);
+        uint32_t t=shoup(residues[prime_i*n+frequency_index(i,n)],scales[prime_i*n+i],modulus.p);
         uint64_t term=uint64_t(t)*modulus.reciprocal,next=fraction+term;
         alpha+=next<fraction;fraction=next;
         accumulator=accumulator+Wide(bases,prime_i).mul_scalar(t);
@@ -156,10 +188,10 @@ void check(cudaError_t status,const char* operation) {
 struct State {
     HostCopyPool copy;
     unsigned n=0,logn=0;
-    uint32_t *input=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr;
+    uint32_t *input=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
     uint32_t *q=nullptr,*product_mod_q=nullptr,*host_input=nullptr,*host_output=nullptr;
     SmallMod* mods=nullptr;
-    Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr;
+    Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr,*tail_forward=nullptr,*tail_inverse=nullptr;
 #if FHERMA_GRAPH
     cudaStream_t stream=nullptr;cudaGraphExec_t graph=nullptr;
 #endif
@@ -174,9 +206,9 @@ struct State {
         if(graph) cudaGraphExecDestroy(graph);
         if(stream) cudaStreamDestroy(stream);
 #endif
-        cudaFree(input);cudaFree(ab);cudaFree(c);cudaFree(bases);
+        cudaFree(input);cudaFree(ab);cudaFree(c);cudaFree(bases);cudaFree(scratch);
         cudaFree(q);cudaFree(product_mod_q);cudaFree(mods);cudaFree(forward);cudaFree(inverse);
-        cudaFree(scale);cudaFree(small_forward);cudaFree(small_inverse);
+        cudaFree(scale);cudaFree(small_forward);cudaFree(small_inverse);cudaFree(tail_forward);cudaFree(tail_inverse);
         cudaFreeHost(host_input);cudaFreeHost(host_output);
     }
 };
@@ -202,20 +234,32 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
         small_rns<<<tiles,Tile/2,0,stream>>>(s.ab,s.mods,s.small_forward,s.n);
         first=Tile;
     }
-    for(unsigned h=first;h<s.n;h*=2)
+    uint32_t* forward_values=s.ab;
+    if(FHERMA_RNS_TAIL && s.n==32768) {
+        dim3 transposes(32,2*PrimeCount),tails(128,2*PrimeCount);
+        transpose_rns<<<transposes,256,0,stream>>>(s.ab,s.scratch,s.n);
+        tail_rns<<<tails,128,0,stream>>>(s.scratch,s.mods,s.tail_forward,s.n);
+        forward_values=s.scratch;
+    } else for(unsigned h=first;h<s.n;h*=2)
         stage_rns<<<half,128,0,stream>>>(s.ab,s.mods,s.forward,s.n,h,s.n/h);
     mark(s,3,stream);
     dim3 inverse_full(full.x,PrimeCount),inverse_half(half.x,PrimeCount);
-    product_rns<<<inverse_full,128,0,stream>>>(s.ab,s.c,s.mods,s.n,s.logn);
+    product_rns<<<inverse_full,128,0,stream>>>(forward_values,s.c,s.mods,s.n,s.logn);
     mark(s,4,stream);
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,PrimeCount);
         small_rns<<<tiles,Tile/2,0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
     }
-    for(unsigned h=first;h<s.n;h*=2)
+    uint32_t* inverse_values=s.c;
+    if(FHERMA_RNS_TAIL && s.n==32768) {
+        dim3 transposes(32,PrimeCount),tails(128,PrimeCount);
+        transpose_rns<<<transposes,256,0,stream>>>(s.c,s.ab,s.n);
+        tail_rns<<<tails,128,0,stream>>>(s.ab,s.mods,s.tail_inverse,s.n);
+        inverse_values=s.ab;
+    } else for(unsigned h=first;h<s.n;h*=2)
         stage_rns<<<inverse_half,128,0,stream>>>(s.c,s.mods,s.inverse,s.n,h,s.n/h);
     mark(s,5,stream);
-    reconstruct_rns<<<full.x,128,0,stream>>>(s.c,s.input,s.mods,s.scale,s.bases,
+    reconstruct_rns<<<full.x,128,0,stream>>>(inverse_values,s.input,s.mods,s.scale,s.bases,
                                             s.q,s.product_mod_q,s.n);
     mark(s,6,stream);
     check(cudaGetLastError(),"RNS kernels");
@@ -238,6 +282,19 @@ void* fherma_init(const fherma::Point& p) {
     upload(s->product_mod_q,constants.product_mod_q);upload(s->q,p.q.data);
     upload(s->forward,constants.forward);upload(s->inverse,constants.inverse);upload(s->scale,constants.scale);
     upload(s->small_forward,constants.small_forward);upload(s->small_inverse,constants.small_inverse);
+    if(FHERMA_RNS_TAIL && p.N==32768) {
+        std::vector<rns::Twiddle> forward_tail(size_t(rns::PrimeCount)*p.N),inverse_tail(forward_tail.size());
+        for(unsigned pi=0;pi<rns::PrimeCount;++pi)
+            for(unsigned half=1;half<32;half*=2)
+                for(unsigned col=0;col<1024;++col)
+                    for(unsigned j=0;j<half;++j) {
+                        unsigned index=pi*p.N+1024*(half-1)+col*half+j;
+                        unsigned source=pi*p.N+(col+1024*j)*(32/half);
+                        forward_tail[index]=constants.forward[source];inverse_tail[index]=constants.inverse[source];
+                    }
+        upload(s->tail_forward,forward_tail);upload(s->tail_inverse,inverse_tail);
+        check(cudaMalloc(&s->scratch,size_t(2)*rns::PrimeCount*p.N*4),"RNS transpose scratch");
+    }
     size_t bytes=size_t(p.N)*rns::AbiWords*4;
     check(cudaMalloc(&s->input,2*bytes),"allocate ABI buffers");
     check(cudaMalloc(&s->ab,size_t(2)*rns::PrimeCount*p.N*4),"allocate RNS operands");
