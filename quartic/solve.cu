@@ -11,7 +11,7 @@
 #define FHERMA_ASYNC_OUTPUT_LATE 1
 #endif
 #ifndef FHERMA_INPUT_WORKER_PIPELINE
-#define FHERMA_INPUT_WORKER_PIPELINE 1
+#define FHERMA_INPUT_WORKER_PIPELINE 0
 #endif
 #ifndef FHERMA_OUTPUT_WORKER_PIPELINE
 #define FHERMA_OUTPUT_WORKER_PIPELINE 0
@@ -80,7 +80,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 0
+#define FHERMA_HOST_PROFILE 1
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -128,7 +128,7 @@
 #define FHERMA_RNS_TILED_PREPARE 1
 #endif
 #ifndef FHERMA_INPUT_WC
-#define FHERMA_INPUT_WC 1
+#define FHERMA_INPUT_WC 0
 #endif
 #ifndef FHERMA_STREAM_OUTPUT
 #define FHERMA_STREAM_OUTPUT 0
@@ -170,7 +170,7 @@
 #define FHERMA_SPIN_COPY 1
 #endif
 #ifndef FHERMA_STREAM_COPY
-#define FHERMA_STREAM_COPY 1
+#define FHERMA_STREAM_COPY 0
 #endif
 #include "fherma.h"
 #include "quartic/host_setup.h"
