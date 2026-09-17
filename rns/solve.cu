@@ -5,7 +5,7 @@
 #define FHERMA_LIBRARY_NTT 0
 #endif
 #ifndef FHERMA_TENSOR_PREPARE
-#define FHERMA_TENSOR_PREPARE 1
+#define FHERMA_TENSOR_PREPARE 0
 #endif
 #ifndef __CUDACC__
 // The CPU adapter cannot execute cuPQC's device-LTO NTT. It only validates
@@ -61,7 +61,10 @@
 #define FHERMA_GRAPH 1
 #endif
 #ifndef FHERMA_COPY_THREADS
-#define FHERMA_COPY_THREADS 8
+#define FHERMA_COPY_THREADS 16
+#endif
+#ifndef FHERMA_OUTPUT_THREADS
+#define FHERMA_OUTPUT_THREADS (FHERMA_COPY_THREADS<8 ? FHERMA_COPY_THREADS : 8)
 #endif
 #ifndef FHERMA_SPIN_COPY
 #define FHERMA_SPIN_COPY 1

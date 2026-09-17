@@ -15,6 +15,9 @@
 #ifndef FHERMA_COPY_THREADS
 #define FHERMA_COPY_THREADS 4
 #endif
+#ifndef FHERMA_OUTPUT_THREADS
+#define FHERMA_OUTPUT_THREADS FHERMA_COPY_THREADS
+#endif
 
 #ifndef FHERMA_STREAM_OUTPUT
 #define FHERMA_STREAM_OUTPUT 1
@@ -27,7 +30,9 @@
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
     static constexpr unsigned Threads=FHERMA_COPY_THREADS;
+    static constexpr unsigned OutputThreads=FHERMA_OUTPUT_THREADS;
     static_assert(Threads>=2 && Threads%2==0,"even copy thread count required");
+    static_assert(OutputThreads>=1 && OutputThreads<=Threads,"output workers must fit the pool");
     struct Job { const char *a=nullptr,*b=nullptr; char* out=nullptr; size_t bytes=0; bool prefault=false; } job_;
     std::mutex mutex_;
     std::condition_variable start_,done_;
@@ -49,8 +54,9 @@ class HostCopyPool {
     }
 #endif
     static void part(const Job& job,unsigned rank) {
+        if(!job.b && rank>=OutputThreads) return;
         if(job.prefault) {
-            size_t begin=job.bytes*rank/Threads,end=job.bytes*(rank+1)/Threads;
+            size_t begin=job.bytes*rank/OutputThreads,end=job.bytes*(rank+1)/OutputThreads;
             for(size_t i=begin;i<end;i+=4096) job.out[i]=0;
         } else if(job.b) {
             unsigned half=rank%(Threads/2);
@@ -63,7 +69,7 @@ class HostCopyPool {
             _mm_sfence();
 #endif
         } else {
-            size_t begin=job.bytes*rank/Threads,end=job.bytes*(rank+1)/Threads;
+            size_t begin=job.bytes*rank/OutputThreads,end=job.bytes*(rank+1)/OutputThreads;
 #if FHERMA_STREAM_OUTPUT
             host_copy_bytes(job.out+begin,job.a+begin,end-begin);
 #else
