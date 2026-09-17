@@ -14,7 +14,7 @@
 #define FHERMA_SPECIAL_ADD_SUB 0
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 0
+#define FHERMA_HOST_PROFILE 1
 #endif
 #ifndef FHERMA_FUSED_TAIL
 #define FHERMA_FUSED_TAIL 1
@@ -29,7 +29,7 @@
 #define FHERMA_DIRECT_OUTPUT 0
 #endif
 #ifndef FHERMA_GRAPH
-#define FHERMA_GRAPH 0
+#define FHERMA_GRAPH 1
 #endif
 #ifndef FHERMA_MONTGOMERY
 #define FHERMA_MONTGOMERY 0
@@ -38,7 +38,7 @@
 #define FHERMA_SOA 1
 #endif
 #ifndef FHERMA_PROFILE
-#define FHERMA_PROFILE 1
+#define FHERMA_PROFILE 0
 #endif
 
 #ifndef FHERMA_TPI
@@ -320,13 +320,13 @@ __global__ __launch_bounds__(128,FHERMA_MIN_BLOCKS)
 __global__
 #endif
 void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
-                      unsigned n,unsigned half) {
+                      unsigned n,unsigned half,unsigned table_stride) {
     unsigned k=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(k>=n/2) return;
     unsigned j=k&(half-1), i=2*(k-j)+j;
     values+=blockIdx.y*n*L;
     const Mod q=load_modulus(qp);
-    const Big u=load_coeff(values,i,n), v=load_coeff(values,i+half,n), tw=load_coeff(table,j*(n/half),n);
+    const Big u=load_coeff(values,i,n), v=load_coeff(values,i+half,n), tw=load_coeff(table,j*table_stride,n);
     auto t=(FHERMA_SKIP_IDENTITY && j==0) ? v : multiply(v,tw,q);
     store_coeff(butterfly_add(u,t,q),values,i,n); store_coeff(butterfly_sub(u,t,q),values,i+half,n);
 }
@@ -354,10 +354,11 @@ void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsi
         store_coeff(load_coeff(values,base+2*t+1,n),tile,2*t+1,256);
     }
     __syncthreads();
-    for(unsigned half=1;half<256;half*=2) {
+    unsigned table_stride=FHERMA_SMALL_TABLES ? 256 : n;
+    for(unsigned half=1;half<256;half*=2,table_stride>>=1) {
         unsigned j=t&(half-1), i=2*(t-j)+j;
         const Big u=load_coeff(tile,i,256), v=load_coeff(tile,i+half,256);
-        const Big tw=FHERMA_SMALL_TABLES ? load_coeff(compact_table,j*(256/half),256) : load_coeff(table,j*(n/half),n);
+        const Big tw=FHERMA_SMALL_TABLES ? load_coeff(compact_table,j*table_stride,256) : load_coeff(table,j*table_stride,n);
         const Big m=(FHERMA_SKIP_IDENTITY && j==0) ? v : multiply(v,tw,q);
         store_coeff(butterfly_add(u,m,q),tile,i,256);
         store_coeff(butterfly_sub(u,m,q),tile,i+half,256);
@@ -412,13 +413,14 @@ __global__ void tail_stages(uint32_t* values,const uint32_t* table,const uint32_
     store_coeff(load_coeff(values,base+2*t,n),tile,2*t,256);
     store_coeff(load_coeff(values,base+2*t+1,n),tile,2*t+1,256);
     __syncthreads();
-    for(unsigned half=1;half<128;half*=2) {
+    unsigned table_stride=n/256;
+    for(unsigned half=1;half<128;half*=2,table_stride>>=1) {
         unsigned j=k&(half-1), i=offset+2*(k-j)+j;
-        unsigned exponent=(column+256*j)*(n/(half*256));
+        unsigned exponent=(column+256*j)*table_stride;
         const Big u=load_coeff(tile,i,256),v=load_coeff(tile,i+half,256);
         unsigned twiddle_i=FHERMA_TAIL_TABLES ? (256*(half-1)+column*half+j) : exponent;
         const Big tw=load_coeff(table,twiddle_i,n);
-        const Big m=(FHERMA_SKIP_IDENTITY && exponent==0) ? v : multiply(v,tw,q);
+        const Big m=(FHERMA_SKIP_IDENTITY && column==0 && j==0) ? v : multiply(v,tw,q);
         store_coeff(butterfly_add(u,m,q),tile,i,256);
         store_coeff(butterfly_sub(u,m,q),tile,i+half,256);
         __syncthreads();
@@ -463,7 +465,7 @@ void launch_ntt(State& s,cudaStream_t stream=nullptr) {
         tail_stages<<<tiles,128,0,stream>>>(s.input,FHERMA_TAIL_TABLES?s.tail_twist:s.twist,s.q,s.n);
         forward_values=s.input;
     } else {
-        for(unsigned half=first;half<s.n;half*=2) stage<<<halves,128,0,stream>>>(s.ab,s.twist,s.q,s.n,half);
+        for(unsigned half=first;half<s.n;half*=2) stage<<<halves,128,0,stream>>>(s.ab,s.twist,s.q,s.n,half,s.n/half);
     }
     mark(s,3);
     product<<<full.x,128,0,stream>>>(forward_values,s.c,s.q,s.n,s.logn);
@@ -478,7 +480,7 @@ void launch_ntt(State& s,cudaStream_t stream=nullptr) {
         tail_stages<<<128,128,0,stream>>>(s.ab,FHERMA_TAIL_TABLES?s.tail_inv_twist:s.inv_twist,s.q,s.n);
         inverse_values=s.ab;
     } else {
-        for(unsigned half=first;half<s.n;half*=2) stage<<<halves.x,128,0,stream>>>(s.c,s.inv_twist,s.q,s.n,half);
+        for(unsigned half=first;half<s.n;half*=2) stage<<<halves.x,128,0,stream>>>(s.c,s.inv_twist,s.q,s.n,half,s.n/half);
     }
     mark(s,5);
     finish<<<full.x,128,0,stream>>>(inverse_values,s.input,s.scale,s.q,s.n);
