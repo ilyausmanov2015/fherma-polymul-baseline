@@ -1,24 +1,27 @@
+#ifndef FHERMA_MIN_BLOCKS
+#define FHERMA_MIN_BLOCKS 3
+#endif
 #ifndef FHERMA_SPIN_COPY
 #define FHERMA_SPIN_COPY 0
 #endif
 #ifndef FHERMA_DIRECT_OUTPUT
-#define FHERMA_DIRECT_OUTPUT 0
+#define FHERMA_DIRECT_OUTPUT 1
 #endif
 #ifndef FHERMA_GRAPH
 #define FHERMA_GRAPH 1
 #endif
 #ifndef FHERMA_MONTGOMERY
-#define FHERMA_MONTGOMERY 1
+#define FHERMA_MONTGOMERY 0
 #endif
 #ifndef FHERMA_SOA
-#define FHERMA_SOA 0
+#define FHERMA_SOA 1
 #endif
 #ifndef FHERMA_PROFILE
 #define FHERMA_PROFILE 0
 #endif
 
 #ifndef FHERMA_TPI
-#define FHERMA_TPI 4
+#define FHERMA_TPI 1
 #endif
 #ifndef FHERMA_PINNED
 #define FHERMA_PINNED 1
@@ -237,7 +240,12 @@ __global__ void prepare(const uint32_t* input,uint32_t* ab,const uint32_t* twist
     const Big x=encode(Big(input,poly*n+i),q), t=load_coeff(twist,i,n);
     store_coeff(multiply(x,t,q),ab+poly*n*L,j,n);
 }
-__global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
+#if FHERMA_MIN_BLOCKS && FHERMA_TPI==1
+__global__ __launch_bounds__(128,FHERMA_MIN_BLOCKS)
+#else
+__global__
+#endif
+void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
                       unsigned n,unsigned half) {
     unsigned k=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(k>=n/2) return;
@@ -250,7 +258,12 @@ __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
 }
 // Keep the first eight radix-2 stages in shared memory. Every block handles
 // an independent contiguous tile; no inter-block synchronization is needed.
-__global__ void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsigned n) {
+#if FHERMA_MIN_BLOCKS && FHERMA_TPI==1
+__global__ __launch_bounds__(128,FHERMA_MIN_BLOCKS)
+#else
+__global__
+#endif
+void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsigned n) {
     __shared__ uint32_t tile[256*L];
     unsigned t=threadIdx.x/FHERMA_TPI, base=blockIdx.x*256;
     values+=blockIdx.y*n*L;

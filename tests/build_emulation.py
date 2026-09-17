@@ -13,6 +13,12 @@ args = parser.parse_args()
 source = (ROOT / 'solve.cu').read_text()
 source = source.replace('#include <cupqc/bigint.hpp>', '#include "tests/cuda_emulation.h"')
 source = source.replace('#include <cuda_runtime.h>', '')
+# Device launch bounds constrain register allocation only; the CPU adapter
+# has no register allocator/SM occupancy model.
+source=re.sub(r'__launch_bounds__\([^)]*\)', '', source)
+# Resolve the two conditional kernel-declaration branches without preprocessing
+# unrelated includes or changing the kernel bodies.
+source=re.sub(r'#if FHERMA_MIN_BLOCKS && FHERMA_TPI==1\s*__global__\s*#else\s*__global__\s*#endif\s*void', '__global__ void', source)
 # Coroutines schedule the actual kernel bodies one barrier phase at a time.
 # This preserves shared-memory communication instead of erasing barriers.
 matches=list(re.finditer(r'__global__ void (\w+)\([^)]*\)\s*\{',source))
