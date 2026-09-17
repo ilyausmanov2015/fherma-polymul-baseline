@@ -1,3 +1,6 @@
+#ifndef FHERMA_SMALL_TABLES
+#define FHERMA_SMALL_TABLES 1
+#endif
 #ifndef FHERMA_TAIL_TABLES
 #define FHERMA_TAIL_TABLES 1
 #endif
@@ -231,6 +234,7 @@ struct State {
     uint32_t *q=nullptr,*roots=nullptr,*twist=nullptr,*inv_twist=nullptr,*scale=nullptr;
     uint32_t *input=nullptr,*ab=nullptr,*c=nullptr;
     uint32_t *tail_twist=nullptr,*tail_inv_twist=nullptr;
+    uint32_t *small_twist=nullptr,*small_inv_twist=nullptr;
 #if FHERMA_PINNED
     uint32_t *host_input=nullptr,*host_output=nullptr;
 #endif
@@ -245,6 +249,7 @@ struct State {
         cudaFree(q); cudaFree(roots); cudaFree(twist); cudaFree(inv_twist);
         cudaFree(scale); cudaFree(input); cudaFree(ab); cudaFree(c);
         cudaFree(tail_twist); cudaFree(tail_inv_twist);
+        cudaFree(small_twist); cudaFree(small_inv_twist);
 #if FHERMA_PINNED
         cudaFreeHost(host_input); cudaFreeHost(host_output);
 #endif
@@ -308,7 +313,7 @@ __global__ __launch_bounds__(128,FHERMA_MIN_BLOCKS)
 __global__
 #endif
 void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsigned n,
-                  const uint32_t* raw_input,unsigned logn) {
+                  const uint32_t* raw_input,unsigned logn,const uint32_t* compact_table) {
     __shared__ uint32_t tile[256*L];
     unsigned t=threadIdx.x/FHERMA_TPI, base=blockIdx.x*256;
     values+=blockIdx.y*n*L;
@@ -327,7 +332,7 @@ void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsi
     for(unsigned half=1;half<256;half*=2) {
         unsigned j=t&(half-1), i=2*(t-j)+j;
         const Big u=load_coeff(tile,i,256), v=load_coeff(tile,i+half,256);
-        const Big tw=load_coeff(table,j*(n/half),n);
+        const Big tw=FHERMA_SMALL_TABLES ? load_coeff(compact_table,j*(256/half),256) : load_coeff(table,j*(n/half),n);
         const Big m=(FHERMA_SKIP_IDENTITY && j==0) ? v : multiply(v,tw,q);
         store_coeff(butterfly_add(u,m,q),tile,i,256);
         store_coeff(butterfly_sub(u,m,q),tile,i+half,256);
@@ -350,6 +355,13 @@ __global__ void transpose_tail(const uint32_t* source,uint32_t* dest,unsigned n)
     __syncthreads();
     for(unsigned dy=0;dy<32;dy+=8)
         dest[(column+y+dy)*128+row+x]=tile[x*33+y+dy];
+}
+__global__ void make_small_tables(const uint32_t* forward,const uint32_t* inverse,
+                                  uint32_t* out_forward,uint32_t* out_inverse,unsigned n) {
+    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=256) return;
+    store_coeff(load_coeff(forward,i*(n/256),n),out_forward,i,256);
+    store_coeff(load_coeff(inverse,i*(n/256),n),out_inverse,i,256);
 }
 // Stage-major twiddles, with consecutive j within each fixed low-bit column.
 // The conventional table becomes strided after the coefficient transpose.
@@ -416,7 +428,7 @@ void launch_ntt(State& s,cudaStream_t stream=nullptr) {
     unsigned first=1;
     if(FHERMA_FUSED_SMALL && s.n>=256) {
         dim3 tiles(s.n/256,2);
-        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.ab,s.twist,s.q,s.n,fused_prepare?s.input:nullptr,s.logn);
+        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.ab,s.twist,s.q,s.n,fused_prepare?s.input:nullptr,s.logn,s.small_twist);
         first=256;
     }
     uint32_t* forward_values=s.ab;
@@ -433,7 +445,7 @@ void launch_ntt(State& s,cudaStream_t stream=nullptr) {
     mark(s,4);
     if(FHERMA_FUSED_SMALL && s.n>=256) {
         unsigned tiles=s.n/256;
-        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.c,s.inv_twist,s.q,s.n,nullptr,s.logn);
+        small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.c,s.inv_twist,s.q,s.n,nullptr,s.logn,s.small_inv_twist);
     }
     uint32_t* inverse_values=s.c;
     if(FHERMA_FUSED_TAIL && s.n==32768) {
@@ -490,6 +502,11 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaMemcpy(s->roots,packed.data(),3*L*4,cudaMemcpyHostToDevice),"copy roots");
     make_tables<<<(p.N*FHERMA_TPI+127)/128,128>>>(s->q,s->roots,s->twist,s->inv_twist,s->scale,p.N);
     check(cudaGetLastError(),"table launch");
+    if(FHERMA_SMALL_TABLES && FHERMA_FUSED_SMALL && p.N>=256) {
+        alloc(&s->small_twist,256); alloc(&s->small_inv_twist,256);
+        make_small_tables<<<2,128>>>(s->twist,s->inv_twist,s->small_twist,s->small_inv_twist,p.N);
+        check(cudaGetLastError(),"small table launch");
+    }
     if(FHERMA_FUSED_TAIL && FHERMA_TAIL_TABLES && p.N==32768) {
         alloc(&s->tail_twist,p.N); alloc(&s->tail_inv_twist,p.N);
         make_tail_tables<<<254,128>>>(s->twist,s->inv_twist,s->tail_twist,s->tail_inv_twist,p.N);

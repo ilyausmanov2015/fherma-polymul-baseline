@@ -34,7 +34,7 @@ for m in reversed(matches):
 source, count = re.subn(
     r'(\w+)<<<([^,<>]+),\s*([^<>]+)>>>\(([^;]+)\);',
     lambda m: 'emulate_launch('+m[2]+','+m[3].split(',')[0]+',[&] { return '+m[1]+'('+m[4]+'); });', source)
-assert count == 13, f'Expected 13 CUDA launch sites, saw {count}; update test adapter explicitly.'
+assert count == 14, f'Expected 14 CUDA launch sites, saw {count}; update test adapter explicitly.'
 assert '<<<' not in source
 (BUILD / 'solve_emulated.cpp').write_text(source)
 cmd = ['clang++', '-std=c++20', '-O2', '-Wall', '-Wextra', '-I'+str(ROOT),
