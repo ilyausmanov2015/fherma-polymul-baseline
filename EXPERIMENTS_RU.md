@@ -592,3 +592,17 @@ cc0151e, spin allocator CPU16: 3/3, 410,636 мкс
 c0c961a добавляет GPU events к существующему mapped pipeline, чтобы
 измерить prepare каждого сегмента, NTT/CRT и накопленное время D2H.
 Это отдельный диагностический прогон, не кандидат на leaderboard.
+
+## Профиль mapped pipeline и сочетание со staged DMA, 17 сентября 22:12 МСК
+
+c0c961a: 3/3, CUDA CI успешен; диагностические 435,798 мкс.
+GPU prepare span ~178, forward/product/fused inverse/CRT ~64,
+D2H+уведомления до последней части ~101–106 мкс. Подробности и различие
+накопленных/отдельных интервалов в research/MAPPED_PROFILE_RU.md.
+Новые поля mapped_gpu_us и async_alloc_us сохраняются collect_results.py.
+
+c762b4d: fused radix-8 и обычные staged H2D/prepare с раздельными потоками,
+GMP N32768 9/9; GPU 3/3, 374,338 мкс, run 6aac3b22e3bdd1a553140778.
+Отправлен на 20 тестов после отдельного нового варианта 8a26852:
+H2D+prepare в каждом из четырёх графов, одна GraphLaunch на часть.
+8a26852 проверен на fallback N1024 9/9, GPU-тест ещё идёт.

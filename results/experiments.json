@@ -8365,6 +8365,28 @@
         "wait": 121.655,
         "unpack": 115.949
       }
+    ],
+    "async_alloc_us": [
+      {
+        "before_pack": 6.054,
+        "worker_resize": 168.85
+      },
+      {
+        "before_pack": 4.833,
+        "worker_resize": 169.479
+      },
+      {
+        "before_pack": 4.137,
+        "worker_resize": 163.189
+      },
+      {
+        "before_pack": 4.221,
+        "worker_resize": 154.941
+      },
+      {
+        "before_pack": 3.52,
+        "worker_resize": 155.653
+      }
     ]
   },
   {
@@ -8491,6 +8513,135 @@
         "wait": 0.462,
         "unpack": 92.698
       }
+    ],
+    "mapped_gpu_us": [
+      {
+        "prepare0": 46.784,
+        "prepare1": 41.28,
+        "prepare2": 41.76,
+        "prepare3": 41.92,
+        "prepare_span": 175.808,
+        "forward": 15.072,
+        "product": 0.416,
+        "inverse": 28.288,
+        "crt": 20.576,
+        "output0": 16.128,
+        "output1": 27.296,
+        "output2": 37.568,
+        "output3": 47.712,
+        "output4": 57.984,
+        "output5": 68.224,
+        "output6": 78.464,
+        "output7": 88.704
+      },
+      {
+        "prepare0": 46.624,
+        "prepare1": 41.632,
+        "prepare2": 42.176,
+        "prepare3": 42.88,
+        "prepare_span": 176.256,
+        "forward": 14.464,
+        "product": 0.416,
+        "inverse": 28.256,
+        "crt": 20.512,
+        "output0": 17.088,
+        "output1": 27.52,
+        "output2": 41.728,
+        "output3": 58.144,
+        "output4": 70.272,
+        "output5": 82.272,
+        "output6": 94.56,
+        "output7": 107.712
+      },
+      {
+        "prepare0": 46.048,
+        "prepare1": 41.76,
+        "prepare2": 42.208,
+        "prepare3": 42.72,
+        "prepare_span": 175.68,
+        "forward": 14.464,
+        "product": 0.416,
+        "inverse": 28.256,
+        "crt": 20.512,
+        "output0": 10.08,
+        "output1": 20.224,
+        "output2": 31.84,
+        "output3": 50.304,
+        "output4": 64.576,
+        "output5": 76.704,
+        "output6": 91.616,
+        "output7": 104.128
+      },
+      {
+        "prepare0": 49.088,
+        "prepare1": 41.024,
+        "prepare2": 43.136,
+        "prepare3": 41.984,
+        "prepare_span": 178.08,
+        "forward": 15.072,
+        "product": 0.416,
+        "inverse": 28.256,
+        "crt": 20.512,
+        "output0": 12.0,
+        "output1": 22.56,
+        "output2": 35.712,
+        "output3": 51.232,
+        "output4": 63.104,
+        "output5": 75.872,
+        "output6": 87.168,
+        "output7": 101.12
+      },
+      {
+        "prepare0": 48.288,
+        "prepare1": 42.208,
+        "prepare2": 41.664,
+        "prepare3": 43.232,
+        "prepare_span": 177.984,
+        "forward": 14.4,
+        "product": 0.416,
+        "inverse": 28.256,
+        "crt": 20.512,
+        "output0": 12.032,
+        "output1": 22.976,
+        "output2": 39.232,
+        "output3": 53.536,
+        "output4": 66.336,
+        "output5": 78.976,
+        "output6": 91.456,
+        "output7": 105.568
+      }
     ]
+  },
+  {
+    "id": "6aac3b22e3bdd1a553140778",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.326173302,
+    "started_at": "2026-09-17T19:10:27.437Z",
+    "finished_at": "2026-09-17T19:12:05.192Z",
+    "commit": "c762b4d6f0695a60f04afb9aa3e0b17fbe42ce18",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.00036733,
+          "median": 0.000374338,
+          "mean": 0.00037472833333333333,
+          "max": 0.000382517
+        }
+      }
+    ],
+    "case_errors": [],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": []
   }
 ]
