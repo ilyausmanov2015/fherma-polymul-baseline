@@ -2,6 +2,9 @@
 // Optional cuPQC staged NTT backend. All tables are parameter-only.
 #include <cupqc/ntt.hpp>
 namespace rns_library {
+#ifndef FHERMA_LIBRARY_FUSED
+#define FHERMA_LIBRARY_FUSED 1
+#endif
 constexpr unsigned N=32768,M=256,K=N/M,Threads=128;
 using Forward=decltype(cupqc::Algorithm<cupqc::algorithm::NTT>()+
     cupqc::Direction<cupqc::nttDirection::FORWARD>()+cupqc::Precision<uint32_t>()+
@@ -70,6 +73,34 @@ __global__ void inverse_second(uint32_t* values,const uint32_t* twiddles,const S
     __syncthreads();
     Inverse().stage_2_store_from_mont(tile,values,blockIdx.x,scheme);
 }
+// The last forward and first inverse stage use the same M-element spectral
+// group. Keep both operands and their pointwise product in shared memory.
+__global__ void fused_middle(const uint32_t* ab,uint32_t* c,const uint32_t* forward,
+                              const uint32_t* inverse,const Scheme* schemes) {
+    __shared__ uint32_t a[M],b[M];
+    unsigned pi=blockIdx.y;auto scheme=schemes[pi];
+    Forward().stage_2_load(a,ab+pi*N,blockIdx.x);
+    Forward().stage_2_load(b,ab+(pi+rns::PrimeCount)*N,blockIdx.x);
+    __syncthreads();
+    Forward().stage_2_execute(a,forward+pi*N,scheme.p);
+    __syncthreads();
+    Forward().stage_2_execute(b,forward+pi*N,scheme.p);
+    __syncthreads();
+    for(unsigned i=threadIdx.x;i<M;i+=Threads) {
+        uint32_t x=a[i],y=b[i];
+        // Accommodate lazy residues before the exact Montgomery product.
+        if(x>=scheme.p) x-=scheme.p;if(x>=scheme.p) x-=scheme.p;
+        if(y>=scheme.p) y-=scheme.p;if(y>=scheme.p) y-=scheme.p;
+        uint64_t product=uint64_t(x)*y;
+        uint32_t factor=uint32_t(product)*scheme.n_dash;
+        uint32_t value=uint32_t((product+uint64_t(factor)*scheme.p)>>32);
+        a[i]=value>=scheme.p ? value-scheme.p : value;
+    }
+    __syncthreads();
+    Inverse().stage_1_execute(a,inverse+pi*N,scheme.p);
+    __syncthreads();
+    Inverse().stage_1_store(a,c+pi*N,blockIdx.x);
+}
 inline void require(cudaError_t error,const char* operation) {
     if(error!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(error));
 }
@@ -96,9 +127,13 @@ struct Tables {
         dim3 first(M,2*rns::PrimeCount),second(K,2*rns::PrimeCount);
         dim3 products(N/Threads,rns::PrimeCount),inverse1(K,rns::PrimeCount),inverse2(M,rns::PrimeCount);
         forward_first<<<first,Threads,0,stream>>>(ab,forward,schemes);
+#if FHERMA_LIBRARY_FUSED
+        fused_middle<<<inverse1,Threads,0,stream>>>(ab,c,forward,inverse,schemes);
+#else
         forward_second<<<second,Threads,0,stream>>>(ab,forward,schemes);
         product<<<products,Threads,0,stream>>>(ab,c,mods);
         inverse_first<<<inverse1,Threads,0,stream>>>(c,inverse,schemes);
+#endif
         inverse_second<<<inverse2,Threads,0,stream>>>(c,inverse,schemes);
     }
 };

@@ -1,8 +1,8 @@
 #ifndef FHERMA_CHUNK_GRAPHS
-#define FHERMA_CHUNK_GRAPHS 1
+#define FHERMA_CHUNK_GRAPHS 0
 #endif
 #ifndef FHERMA_LIBRARY_NTT
-#define FHERMA_LIBRARY_NTT 0
+#define FHERMA_LIBRARY_NTT 1
 #endif
 #ifndef FHERMA_TENSOR_PREPARE
 #define FHERMA_TENSOR_PREPARE 0
@@ -67,7 +67,7 @@
 #define FHERMA_SPIN_COPY 1
 #endif
 #ifndef FHERMA_STREAM_COPY
-#define FHERMA_STREAM_COPY 0
+#define FHERMA_STREAM_COPY 1
 #endif
 #include "fherma.h"
 #include "rns/host_setup.h"
