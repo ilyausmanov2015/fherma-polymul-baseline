@@ -1,5 +1,8 @@
+#ifndef FHERMA_OUTPUT_WC
+#define FHERMA_OUTPUT_WC 1
+#endif
 #ifndef FHERMA_PHYSICAL_CORES
-#define FHERMA_PHYSICAL_CORES 1
+#define FHERMA_PHYSICAL_CORES 0
 #endif
 #ifndef FHERMA_LAZY_PREPARE
 #define FHERMA_LAZY_PREPARE 0
@@ -176,7 +179,7 @@
 #define FHERMA_GRAPH 1
 #endif
 #ifndef FHERMA_COPY_THREADS
-#define FHERMA_COPY_THREADS 8
+#define FHERMA_COPY_THREADS 16
 #endif
 #ifndef FHERMA_OUTPUT_THREADS
 #define FHERMA_OUTPUT_THREADS (FHERMA_COPY_THREADS<8 ? FHERMA_COPY_THREADS : 8)
@@ -1232,6 +1235,7 @@ void* fherma_init(const fherma::Point& p) {
                   "profile arithmetic separately from overlapped host transfers");
     static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments fit the smallest point");
     static_assert(!FHERMA_MAPPED_OUTPUT || FHERMA_PIPELINE_OUTPUT==1,"mapped output waits for the complete CRT kernel");
+    static_assert(!FHERMA_OUTPUT_WC || (!FHERMA_OUTPUT_APPEND && !FHERMA_MAPPED_OUTPUT),"WC output uses fenced copies and an explicit device alias if mapped");
     static_assert(!FHERMA_CRT_OUTPUT_SIGNAL || (FHERMA_NATURAL_INVERSE && FHERMA_OUTPUT_SIGNAL && FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE && !FHERMA_MAPPED_OUTPUT && FHERMA_PIPELINE_OUTPUT>1),"direct CRT signals require natural contiguous output and captured completion");
     static_assert(!(FHERMA_OUTPUT_APPEND && FHERMA_OUTPUT_SPARE),"choose one output construction experiment");
     static_assert(!FHERMA_HARVEY || (Tile==1024 && FHERMA_RNS_RADIX8 && FHERMA_DIF_FORWARD && FHERMA_RNS_TAIL),"Harvey uses natural input and 1024-element radix-8 tiles");
@@ -1328,8 +1332,10 @@ void* fherma_init(const fherma::Point& p) {
     s->mapped_input=s->host_input;
 #endif
 #if defined(__CUDACC__) && FHERMA_CRT_OUTPUT_SIGNAL
-    check(cudaHostAlloc(reinterpret_cast<void**>(&s->host_output),bytes,cudaHostAllocMapped),"mapped CRT output");
+    check(cudaHostAlloc(reinterpret_cast<void**>(&s->host_output),bytes,cudaHostAllocMapped | (FHERMA_OUTPUT_WC ? cudaHostAllocWriteCombined : 0)),"mapped CRT output");
     check(cudaHostGetDevicePointer(reinterpret_cast<void**>(&s->mapped_output),s->host_output,0),"map CRT output alias");
+#elif defined(__CUDACC__) && FHERMA_OUTPUT_WC
+    check(cudaHostAlloc(reinterpret_cast<void**>(&s->host_output),bytes,cudaHostAllocWriteCombined),"WC pinned RNS output");
 #else
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_output),bytes),"pinned RNS output");
     s->mapped_output=s->host_output;
@@ -1338,6 +1344,9 @@ void* fherma_init(const fherma::Point& p) {
     s->direct_output=FHERMA_CRT_OUTPUT_SIGNAL && s->n==32768;
 #endif
     std::memset(s->host_input,0,2*bytes);std::memset(s->host_output,0,bytes);
+#if (FHERMA_INPUT_WC || FHERMA_OUTPUT_WC) && defined(__x86_64__) && defined(__GNUC__)
+    _mm_mfence(); // Publish initialization of the empty WC staging buffers.
+#endif
 #if FHERMA_PROFILE
     for(auto& event:s->events) check(cudaEventCreate(&event),"RNS profile event");
 #endif

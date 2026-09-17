@@ -142,7 +142,9 @@ class HostCopyPool {
 #endif
         } else {
             size_t begin=job.bytes*rank/OutputThreads,end=job.bytes*(rank+1)/OutputThreads;
-#if FHERMA_STREAM_OUTPUT
+#if FHERMA_OUTPUT_WC
+            host_copy_wc(job.out+begin,job.a+begin,end-begin);
+#elif FHERMA_STREAM_OUTPUT
             host_copy_bytes(job.out+begin,job.a+begin,end-begin);
 #elif FHERMA_CACHED_VECTOR
             host_copy_cached(job.out+begin,job.a+begin,end-begin);
