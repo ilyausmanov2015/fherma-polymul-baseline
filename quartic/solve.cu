@@ -1,3 +1,6 @@
+#ifndef FHERMA_DIRECT_COPY
+#define FHERMA_DIRECT_COPY 1
+#endif
 #ifndef FHERMA_ASYNC_OUTPUT_PREFAULT
 #define FHERMA_ASYNC_OUTPUT_PREFAULT 1
 #endif
@@ -1331,6 +1334,3 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     }
 }
 void fherma_free(void* state) { delete static_cast<State*>(state); }
-#ifndef FHERMA_DIRECT_COPY
-#define FHERMA_DIRECT_COPY 1
-#endif
