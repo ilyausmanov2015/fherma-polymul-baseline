@@ -1,3 +1,6 @@
+#ifndef FHERMA_PREPARE_VECTOR
+#define FHERMA_PREPARE_VECTOR 1
+#endif
 #ifndef FHERMA_OUTPUT_ALLOCATOR_SPIN
 #define FHERMA_OUTPUT_ALLOCATOR_SPIN 1
 #endif
@@ -62,7 +65,7 @@
 #define FHERMA_INPUT_WORKERS_ONLY 0
 #endif
 #ifndef FHERMA_ASYNC_OUTPUT_ALLOC
-#define FHERMA_ASYNC_OUTPUT_ALLOC 1
+#define FHERMA_ASYNC_OUTPUT_ALLOC 0
 #endif
 #ifndef FHERMA_CRT_LIMB_SUMS
 #define FHERMA_CRT_LIMB_SUMS 0
@@ -107,7 +110,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 1
+#define FHERMA_HOST_PROFILE 0
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -315,11 +318,30 @@ template<bool Lazy> __global__ void prepare_grouped(const uint32_t* input,uint32
     unsigned pi=(blockIdx.y%(ModCount/PreparePrimes))*PreparePrimes+warp,poly=blockIdx.y/(ModCount/PreparePrimes);
     unsigned base=begin+blockIdx.x*32,end=count ? begin+count : n;
     input+=poly*(packed ? count : n)*AbiWords;
+#if FHERMA_PREPARE_VECTOR
+    static_assert(AbiWords%4==0,"vector input loads stay inside one coefficient");
+    #pragma unroll
+    for(unsigned index=4*t;index<32*AbiWords;index+=4*PrepareThreads) {
+        unsigned row=index/AbiWords,word=index%AbiWords;
+        if(base+row<end) {
+            const uint32_t* source=input+(base+row-(packed ? begin : 0))*AbiWords+word;
+#if defined(__CUDACC__)
+            uint4 values=*reinterpret_cast<const uint4*>(source);
+            tile[row*29+word]=values.x;tile[row*29+word+1]=values.y;
+            tile[row*29+word+2]=values.z;tile[row*29+word+3]=values.w;
+#else
+            // Match the exact four scalar indices in the GMP adapter.
+            for(unsigned k=0;k<4;++k) tile[row*29+word+k]=source[k];
+#endif
+        }
+    }
+#else
     #pragma unroll
     for(unsigned index=t;index<32*AbiWords;index+=PrepareThreads) {
         unsigned row=index/AbiWords,word=index%AbiWords;
         if(base+row<end) tile[row*29+word]=input[(base+row-(packed ? begin : 0))*AbiWords+word];
     }
+#endif
     __syncthreads();
     unsigned i=base+lane;
     if(i>=end) return;
