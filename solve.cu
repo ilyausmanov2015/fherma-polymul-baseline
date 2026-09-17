@@ -1,15 +1,18 @@
 #ifndef FHERMA_MONTGOMERY
-#define FHERMA_MONTGOMERY 1
+#define FHERMA_MONTGOMERY 0
 #endif
 #ifndef FHERMA_SOA
-#define FHERMA_SOA 0
+#define FHERMA_SOA 1
 #endif
 #ifndef FHERMA_PROFILE
 #define FHERMA_PROFILE 1
 #endif
 
 #ifndef FHERMA_TPI
-#define FHERMA_TPI 4
+#define FHERMA_TPI 1
+#endif
+#ifndef FHERMA_PINNED
+#define FHERMA_PINNED 1
 #endif
 
 // Exact negacyclic NTT baseline. All device modular arithmetic uses cuPQC.
@@ -19,6 +22,7 @@
 #include <cuda_runtime.h>
 #include <memory>
 #include <cstdio>
+#include <cstring>
 
 namespace {
 constexpr unsigned L=28;
@@ -26,7 +30,7 @@ constexpr unsigned L=28;
 using BI=decltype(cupqc::BitWidth<L*32>()+cupqc::SM<800>()+cupqc::Thread());
 #else
 static_assert(FHERMA_MONTGOMERY && !FHERMA_SOA,"cooperative experiment uses Montgomery and native layout");
-using BI=decltype(cupqc::BitWidth<L*32>()+cupqc::SM<800>()+cupqc::Warp()+cupqc::TPI<FHERMA_TPI>());
+using BI=decltype(cupqc::BitWidth<L*32>()+cupqc::SM<800>()+cupqc::TPI<FHERMA_TPI>()+cupqc::Warp());
 #endif
 using Big=typename BI::bigint;
 __device__ Big load_coeff(const uint32_t* p,unsigned i,unsigned n) {
@@ -91,11 +95,17 @@ struct State {
     uint32_t n=0, logn=0;
     uint32_t *q=nullptr,*roots=nullptr,*twist=nullptr,*inv_twist=nullptr,*scale=nullptr;
     uint32_t *input=nullptr,*ab=nullptr,*c=nullptr;
+#if FHERMA_PINNED
+    uint32_t *host_input=nullptr,*host_output=nullptr;
+#endif
 #if FHERMA_PROFILE
     cudaEvent_t events[8]{};
 #endif
     ~State() { cudaFree(q); cudaFree(roots); cudaFree(twist); cudaFree(inv_twist);
         cudaFree(scale); cudaFree(input); cudaFree(ab); cudaFree(c);
+#if FHERMA_PINNED
+        cudaFreeHost(host_input); cudaFreeHost(host_output);
+#endif
 #if FHERMA_PROFILE
         for(auto e:events) if(e) cudaEventDestroy(e);
 #endif
@@ -177,6 +187,12 @@ void* fherma_init(const fherma::Point& p) {
     auto alloc=[](uint32_t** ptr,size_t coeffs) { check(cudaMalloc(ptr,coeffs*L*4),"cudaMalloc"); };
     alloc(&s->q,1); alloc(&s->roots,3); alloc(&s->twist,p.N); alloc(&s->inv_twist,p.N);
     alloc(&s->scale,p.N); alloc(&s->input,2*p.N); alloc(&s->ab,2*p.N); alloc(&s->c,p.N);
+#if FHERMA_PINNED
+    check(cudaMallocHost(reinterpret_cast<void**>(&s->host_input),size_t(2)*p.N*L*4),"pinned inputs");
+    check(cudaMallocHost(reinterpret_cast<void**>(&s->host_output),size_t(p.N)*L*4),"pinned output");
+    std::memset(s->host_input,0,size_t(2)*p.N*L*4);
+    std::memset(s->host_output,0,size_t(p.N)*L*4);
+#endif
     check(cudaMemcpy(s->q,p.q.data.data(),L*4,cudaMemcpyHostToDevice),"copy q");
     check(cudaMemcpy(s->roots,packed.data(),3*L*4,cudaMemcpyHostToDevice),"copy roots");
     make_tables<<<(p.N*FHERMA_TPI+127)/128,128>>>(s->q,s->roots,s->twist,s->inv_twist,s->scale,p.N);
@@ -190,8 +206,14 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     auto& s=*static_cast<State*>(opaque); size_t words=size_t(s.n)*L, bytes=words*4;
     if(in.a.data.size()!=words || in.b.data.size()!=words) throw std::runtime_error("input size");
     mark(s,0);
+#if FHERMA_PINNED
+    std::memcpy(s.host_input,in.a.data.data(),bytes);
+    std::memcpy(s.host_input+words,in.b.data.data(),bytes);
+    check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"pinned inputs H2D");
+#else
     check(cudaMemcpy(s.input,in.a.data.data(),bytes,cudaMemcpyHostToDevice),"copy a");
     check(cudaMemcpy(s.input+words,in.b.data.data(),bytes,cudaMemcpyHostToDevice),"copy b");
+#endif
     mark(s,1);
     dim3 full((s.n*FHERMA_TPI+127)/128,2), halves((s.n/2*FHERMA_TPI+127)/128,2);
     prepare<<<full,128>>>(s.input,s.ab,s.twist,s.q,s.n,s.logn);
@@ -205,8 +227,14 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     finish<<<full.x,128>>>(s.c,s.input,s.scale,s.q,s.n);
     mark(s,6);
     check(cudaGetLastError(),"NTT launch");
-    fherma::Outputs out; out.c.shape={s.n,L}; out.c.data.resize(words);
+    fherma::Outputs out; out.c.shape={s.n,L};
+#if FHERMA_PINNED
+    check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"pinned output D2H");
+    out.c.data.assign(s.host_output,s.host_output+words);
+#else
+    out.c.data.resize(words);
     check(cudaMemcpy(out.c.data.data(),s.input,bytes,cudaMemcpyDeviceToHost),"copy output / synchronize");
+#endif
     mark(s,7);
 #if FHERMA_PROFILE
     check(cudaEventSynchronize(s.events[7]),"profile synchronize");
