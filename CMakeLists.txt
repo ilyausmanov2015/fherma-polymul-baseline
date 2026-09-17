@@ -36,6 +36,11 @@ target_compile_options(solution PRIVATE
   $<$<COMPILE_LANGUAGE:CUDA>:-arch=${FHERMA_CUDA_ARCH};-dlto>)
 target_link_options(solution PRIVATE
   $<DEVICE_LINK:-arch=${FHERMA_CUDA_ARCH};-dlto>)
+option(FHERMA_RESOURCE_REPORT "Print CUDA register and spill statistics" OFF)
+if(FHERMA_RESOURCE_REPORT)
+  target_compile_options(solution PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>)
+  target_link_options(solution PRIVATE $<DEVICE_LINK:-Xptxas=-v>)
+endif()
 
 # NVIDIA cuPQC, when the challenge image provides it (CUPQC_SDK_DIR is set in
 # fherma/cupqc): its device BigInt library and headers. BigInt is linked because
