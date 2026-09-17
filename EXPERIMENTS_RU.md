@@ -471,3 +471,26 @@ packing 98–103, submission 34–36, reserve+prefault+resize 129–134,
 Сумма этих host-интервалов не является чистым GPU-временем: вычисления
 и передачи идут параллельно. Размеры частей и число output workers
 проверяются отдельно; точный лучший коммит a32b5aa остаётся закреплён.
+
+
+## Ввод и прямой CRT output, 17 сентября 21:10 МСК
+
+Все короткие прогоны: 3/3 и оба прогрева корректны.
+
+| Вариант | Коммит | Медиана, мкс |
+|---|---|---:|
+| Mapped input: 2 части | 29e55a0 | 393,662 |
+| Mapped input: 16 CPU на выводе | d7b387c | 414,310 |
+| Mapped input: D2H и completion в графе | ba8dd0b | 381,861 |
+| Coalesced mapped CRT с частичными completion flags | ec6017f | 411,962 |
+| Mapped input: 8 частей | 42b28f0 | 403,434 |
+| Mapped WB input и cached CPU stores | 5c106ff | 386,249 |
+| Mapped input: один граф с input readiness | 2909417 | 396,584 |
+
+Для ba8dd0b запущен benchmark 20 случаев: короткого набора недостаточно
+для различения 381,861 и лучшего полного 383,2485. Остальные варианты
+не продвигаются. На leaderboard остаётся a32b5aa, 383,2485 мкс.
+Протокол прямого CRT output: research/DIRECT_CRT_OUTPUT_RU.md.
+Для ec6017f GMP N32768 + N1024 — 18/18; CUDA CI успешен.
+Далее отдельно проверяются persistent CPU input в mapped graph (abdfb08),
+WB-вход с профилем (c6b281f), vector stores прямого CRT (70774cd).

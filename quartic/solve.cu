@@ -1,8 +1,11 @@
+#ifndef FHERMA_FUSED_TILE
+#define FHERMA_FUSED_TILE 1
+#endif
 #ifndef FHERMA_CRT_VECTOR_OUTPUT
-#define FHERMA_CRT_VECTOR_OUTPUT 1
+#define FHERMA_CRT_VECTOR_OUTPUT 0
 #endif
 #ifndef FHERMA_CRT_OUTPUT_SIGNAL
-#define FHERMA_CRT_OUTPUT_SIGNAL 1
+#define FHERMA_CRT_OUTPUT_SIGNAL 0
 #endif
 #ifndef FHERMA_INPUT_GRAPH
 #define FHERMA_INPUT_GRAPH 0
@@ -44,7 +47,7 @@
 #define FHERMA_CRT_LIMB_SUMS 0
 #endif
 #ifndef FHERMA_NATURAL_INVERSE
-#define FHERMA_NATURAL_INVERSE 1
+#define FHERMA_NATURAL_INVERSE 0
 #endif
 #ifndef FHERMA_CRT_PIPELINE
 #define FHERMA_CRT_PIPELINE 0
@@ -59,7 +62,7 @@
 #define FHERMA_HARVEY 1
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 1
+#define FHERMA_OUTPUT_GRAPH 0
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -573,6 +576,130 @@ template<bool Inverse,bool Product,bool Lazy> __global__ void harvey_small(
         for(unsigned lane=0;lane<LastRadix;++lane) values[i+lane*half]=x[lane];
     }
 }
+// Complete both forward tiles, multiply and invert them without materializing
+// their spectra in global memory. Only the outer five stages remain separate.
+template<bool Lazy> __global__ void harvey_convolution_tile(const uint32_t* operands,uint32_t* result,
+    const SmallMod* mods,const Twiddle* forward,const Twiddle* inverse,unsigned n) {
+    __shared__ uint32_t a[Tile],b[Tile];
+    constexpr unsigned Passes=10/HarveyBits,Remaining=10%HarveyBits,LastRadix=1u<<Remaining;
+    unsigned t=threadIdx.x,pi=blockIdx.y%ModCount,begin=blockIdx.x*Tile;
+    const uint32_t* left=operands+blockIdx.y*n+begin;
+    const uint32_t* right=left+PrimeCount*n;
+    result+=blockIdx.y*n+begin;forward+=pi*n;inverse+=pi*n;
+    SmallMod modulus=mods[pi];uint32_t p=modulus.p;
+    #pragma unroll
+    for(unsigned k=0;k<HarveyRadix;++k) {
+        unsigned i=t+k*HarveyThreads;
+        a[harvey_index<false>(i)]=left[i];b[harvey_index<false>(i)]=right[i];
+    }
+    __syncthreads();
+    #pragma unroll
+    for(unsigned pass=0;pass<Passes;++pass) {
+        unsigned half=1u<<(10-HarveyBits*(pass+1));
+        unsigned j=t&(half-1),i=HarveyRadix*(t-j)+j;
+        uint32_t x[HarveyRadix],y[HarveyRadix];
+        #pragma unroll
+        for(unsigned k=0;k<HarveyRadix;++k) {
+            x[k]=a[harvey_index<false>(i+k*half)];y[k]=b[harvey_index<false>(i+k*half)];
+        }
+        #pragma unroll
+        for(unsigned phase=0;phase<HarveyBits;++phase) {
+            unsigned step=(HarveyRadix/2)>>phase,h=step*half;
+            #pragma unroll
+            for(unsigned group=0;group<HarveyRadix;group+=2*step) {
+                Twiddle w=forward[n/(2*h)+(begin+i+group*half)/(2*h)];
+                #pragma unroll
+                for(unsigned lane=0;lane<step;++lane) {
+                    harvey_pair<false,Lazy>(x[group+lane],x[group+lane+step],w,p);
+                    harvey_pair<false,Lazy>(y[group+lane],y[group+lane+step],w,p);
+                }
+            }
+        }
+        #pragma unroll
+        for(unsigned k=0;k<HarveyRadix;++k) {
+            a[harvey_index<false>(i+k*half)]=x[k];b[harvey_index<false>(i+k*half)]=y[k];
+        }
+        __syncthreads();
+    }
+    uint32_t products[HarveyRadix];
+    #pragma unroll
+    for(unsigned k=0;k<HarveyRadix/LastRadix;++k) {
+        unsigned i=LastRadix*(t+k*HarveyThreads);
+        uint32_t x[LastRadix],y[LastRadix];
+        #pragma unroll
+        for(unsigned lane=0;lane<LastRadix;++lane) {
+            x[lane]=a[harvey_index<false>(i+lane)];y[lane]=b[harvey_index<false>(i+lane)];
+        }
+        #pragma unroll
+        for(unsigned phase=0;phase<Remaining;++phase) {
+            unsigned h=(LastRadix/2)>>phase;
+            #pragma unroll
+            for(unsigned group=0;group<LastRadix;group+=2*h) {
+                Twiddle w=forward[n/(2*h)+(begin+i+group)/(2*h)];
+                #pragma unroll
+                for(unsigned lane=0;lane<h;++lane) {
+                    harvey_pair<false,Lazy>(x[group+lane],x[group+lane+h],w,p);
+                    harvey_pair<false,Lazy>(y[group+lane],y[group+lane+h],w,p);
+                }
+            }
+        }
+        #pragma unroll
+        for(unsigned lane=0;lane<LastRadix;++lane)
+            products[k*LastRadix+lane]=multiply_mod(x[lane],y[lane],modulus);
+    }
+    // Every last-stage forward read must finish before reusing the tile under
+    // the inverse swizzle. Keeping these products in registers avoids a third
+    // shared-memory tile and prevents cross-thread read/write races.
+    __syncthreads();
+    #pragma unroll
+    for(unsigned k=0;k<HarveyRadix/LastRadix;++k) {
+        unsigned i=LastRadix*(t+k*HarveyThreads);
+        #pragma unroll
+        for(unsigned lane=0;lane<LastRadix;++lane)
+            a[harvey_index<true>(i+lane)]=products[k*LastRadix+lane];
+    }
+    __syncthreads();
+    #pragma unroll
+    for(unsigned pass=0;pass<Passes;++pass) {
+        unsigned half=1u<<(HarveyBits*pass),j=t&(half-1),i=HarveyRadix*(t-j)+j;
+        uint32_t x[HarveyRadix];
+        #pragma unroll
+        for(unsigned k=0;k<HarveyRadix;++k) x[k]=a[harvey_index<true>(i+k*half)];
+        #pragma unroll
+        for(unsigned phase=0;phase<HarveyBits;++phase) {
+            unsigned step=1u<<phase,h=step*half;
+            #pragma unroll
+            for(unsigned group=0;group<HarveyRadix;group+=2*step) {
+                Twiddle w=inverse[n/(2*h)+(begin+i+group*half)/(2*h)];
+                #pragma unroll
+                for(unsigned lane=0;lane<step;++lane)
+                    harvey_pair<true,Lazy>(x[group+lane],x[group+lane+step],w,p);
+            }
+        }
+        #pragma unroll
+        for(unsigned k=0;k<HarveyRadix;++k) a[harvey_index<true>(i+k*half)]=x[k];
+        __syncthreads();
+    }
+    #pragma unroll
+    for(unsigned k=0;k<HarveyRadix/LastRadix;++k) {
+        unsigned i=t+k*HarveyThreads,half=Tile/LastRadix;uint32_t x[LastRadix];
+        #pragma unroll
+        for(unsigned lane=0;lane<LastRadix;++lane) x[lane]=a[harvey_index<true>(i+lane*half)];
+        #pragma unroll
+        for(unsigned phase=0;phase<Remaining;++phase) {
+            unsigned step=1u<<phase,h=step*half;
+            #pragma unroll
+            for(unsigned group=0;group<LastRadix;group+=2*step) {
+                Twiddle w=inverse[n/(2*h)+(begin+i+group*half)/(2*h)];
+                #pragma unroll
+                for(unsigned lane=0;lane<step;++lane)
+                    harvey_pair<true,Lazy>(x[group+lane],x[group+lane+step],w,p);
+            }
+        }
+        #pragma unroll
+        for(unsigned lane=0;lane<LastRadix;++lane) result[i+lane*half]=x[lane];
+    }
+}
 template<bool Inverse,bool Lazy> __global__ void harvey_tail(const uint32_t* source,uint32_t* destination,
     const SmallMod* mods,const Twiddle* roots,unsigned n) {
     __shared__ uint32_t tile[TailColumns*(TailRows+1)];
@@ -983,7 +1110,7 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
         dim3 tails(128,2*PrimeCount),tiles(s.n/Tile,2*PrimeCount);
         if(harvey) {
             harvey_tail<false,Lazy><<<tails,128,0,stream>>>(prepared,s.scratch,s.mods,s.forward,s.n);
-            harvey_small<false,false,Lazy><<<tiles,HarveyThreads,0,stream>>>(s.scratch,s.mods,s.forward,s.n);
+            if(!FHERMA_FUSED_TILE) harvey_small<false,false,Lazy><<<tiles,HarveyThreads,0,stream>>>(s.scratch,s.mods,s.forward,s.n);
         } else {
         tail_dif_rns<Lazy><<<tails,128,0,stream>>>(prepared,s.scratch,s.mods,s.tail_forward,s.n);
         small_dif_rns<Lazy><<<tiles,Tile/8,0,stream>>>(s.scratch,s.mods,s.small_forward,s.n);
@@ -1017,7 +1144,9 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,PrimeCount);
         if(harvey) {
-            if(fused_product)
+            if(FHERMA_FUSED_TILE)
+                harvey_convolution_tile<Lazy><<<tiles,HarveyThreads,0,stream>>>(forward_values,s.c,s.mods,s.forward,s.inverse,s.n);
+            else if(fused_product)
                 harvey_small<true,true,Lazy><<<tiles,HarveyThreads,0,stream>>>(s.c,s.mods,s.inverse,s.n,forward_values,s.logn);
             else
                 harvey_small<true,false,Lazy><<<tiles,HarveyThreads,0,stream>>>(s.c,s.mods,s.inverse,s.n);
@@ -1092,6 +1221,7 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(!(FHERMA_OUTPUT_APPEND && FHERMA_OUTPUT_SPARE),"choose one output construction experiment");
     static_assert(!FHERMA_HARVEY || (Tile==1024 && FHERMA_RNS_RADIX8 && FHERMA_DIF_FORWARD && FHERMA_RNS_TAIL),"Harvey uses natural input and 1024-element radix-8 tiles");
     static_assert(!FHERMA_NATURAL_INVERSE || FHERMA_HARVEY,"natural inverse uses odd-root NTT");
+    static_assert(!FHERMA_FUSED_TILE || (FHERMA_HARVEY && FHERMA_FUSED_PRODUCT),"fused tile uses paired Harvey forward and inverse transforms");
     static_assert(!FHERMA_CRT_PIPELINE || FHERMA_CRT_PIPELINE==2 || FHERMA_CRT_PIPELINE==4 || FHERMA_CRT_PIPELINE==8,"CRT chunks must be 2, 4 or 8");
     static_assert(!FHERMA_CRT_PIPELINE || FHERMA_PIPELINE_INPUT>1,"CRT pipeline reuses the input transfer stream");
     static_assert(!FHERMA_CRT_PIPELINE || (FHERMA_NATURAL_INVERSE && FHERMA_OUTPUT_GRAPH && FHERMA_OVERLAP_PREPARE && !FHERMA_MAPPED_OUTPUT),"CRT pipeline requires natural graph output");
