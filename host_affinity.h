@@ -34,11 +34,11 @@ inline void pin_near_gpu() {
         if(count<1 || first<0) continue;
         for(int cpu=first;cpu<=last && cpu<CPU_SETSIZE;++cpu) if(CPU_ISSET(cpu,&allowed)) {
             ++local;
+            CPU_SET(cpu,&chosen);
             if(selected<0 || cpu==current) selected=cpu;
         }
     }
     if(selected<0) return;
-    CPU_SET(selected,&chosen);
     if(sched_setaffinity(0,sizeof(chosen),&chosen)==0)
         std::fprintf(stderr,"PLACEMENT gpu_node=%d cpu=%d allowed_on_node=%d\n",node,selected,local);
 #endif

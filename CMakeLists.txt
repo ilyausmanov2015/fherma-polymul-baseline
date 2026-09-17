@@ -27,6 +27,8 @@ endif()
 set(FHERMA_CUDA_ARCH native CACHE STRING "nvcc -arch value")
 
 add_executable(solution main.cpp solve.cu)
+find_package(Threads REQUIRED)
+target_link_libraries(solution PRIVATE Threads::Threads)
 target_include_directories(solution PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 set_target_properties(solution PROPERTIES

@@ -21,7 +21,10 @@
 #define FHERMA_NUMA 1
 #endif
 #ifndef FHERMA_REGISTER_INPUTS
-#define FHERMA_REGISTER_INPUTS 1
+#define FHERMA_REGISTER_INPUTS 0
+#endif
+#ifndef FHERMA_PARALLEL_COPY
+#define FHERMA_PARALLEL_COPY 1
 #endif
 
 // Exact negacyclic NTT baseline. All device modular arithmetic uses cuPQC.
@@ -30,6 +33,7 @@
 #include <cupqc/bigint.hpp>
 #include <cuda_runtime.h>
 #include "host_affinity.h"
+#include "host_copy_pool.h"
 #include <memory>
 #include <cstdio>
 #include <cstring>
@@ -114,6 +118,9 @@ struct RegisteredInput {
     ~RegisteredInput() { if(ptr) cudaHostUnregister(ptr); }
 };
 struct State {
+#if FHERMA_PARALLEL_COPY
+    HostCopyPool copy;
+#endif
     uint32_t n=0, logn=0;
     uint32_t *q=nullptr,*roots=nullptr,*twist=nullptr,*inv_twist=nullptr,*scale=nullptr;
     uint32_t *input=nullptr,*ab=nullptr,*c=nullptr;
@@ -261,8 +268,12 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
         registered=registered_a.pin(in.a.data.data(),bytes) && registered_b.pin(in.b.data.data(),bytes);
     if(!registered) {
         registered_a.release(); registered_b.release();
+#if FHERMA_PARALLEL_COPY
+        s.copy.inputs(s.host_input,in.a.data.data(),in.b.data.data(),bytes);
+#else
         std::memcpy(s.host_input,in.a.data.data(),bytes);
         std::memcpy(s.host_input+words,in.b.data.data(),bytes);
+#endif
     }
 #if FHERMA_PROFILE
     double pack_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-pack_start).count();
@@ -302,11 +313,19 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     check(cudaGetLastError(),"NTT launch");
     fherma::Outputs out; out.c.shape={s.n,L};
 #if FHERMA_PINNED
+#if FHERMA_PARALLEL_COPY
+    // Allocate while the GPU executes the already-enqueued NTT kernels.
+    out.c.data.resize(words);
+#endif
     check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"pinned output D2H");
 #if FHERMA_PROFILE
     auto unpack_start=std::chrono::steady_clock::now();
 #endif
+#if FHERMA_PARALLEL_COPY
+    s.copy.output(out.c.data.data(),s.host_output,bytes);
+#else
     out.c.data.assign(s.host_output,s.host_output+words);
+#endif
 #if FHERMA_PROFILE
     double unpack_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-unpack_start).count();
 #endif
