@@ -21,13 +21,13 @@
 #define FHERMA_FUSED_SMALL 1
 #endif
 #ifndef FHERMA_NUMA
-#define FHERMA_NUMA 0
+#define FHERMA_NUMA 1
 #endif
 #ifndef FHERMA_REGISTER_INPUTS
 #define FHERMA_REGISTER_INPUTS 0
 #endif
 #ifndef FHERMA_PARALLEL_COPY
-#define FHERMA_PARALLEL_COPY 0
+#define FHERMA_PARALLEL_COPY 1
 #endif
 #ifndef FHERMA_STREAM_COPY
 #define FHERMA_STREAM_COPY 1
@@ -318,8 +318,12 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     auto& s=*static_cast<State*>(opaque); size_t words=size_t(s.n)*L, bytes=words*4;
     if(in.a.data.size()!=words || in.b.data.size()!=words) throw std::runtime_error("input size");
 #if FHERMA_GRAPH
+#if FHERMA_PARALLEL_COPY
+    s.copy.inputs(s.host_input,in.a.data.data(),in.b.data.data(),bytes);
+#else
     std::memcpy(s.host_input,in.a.data.data(),bytes);
     std::memcpy(s.host_input+words,in.b.data.data(),bytes);
+#endif
     check(cudaGraphLaunch(s.graph,s.stream),"execute graph");
     check(cudaStreamSynchronize(s.stream),"graph result ready");
     fherma::Outputs out; out.c.shape={s.n,L};

@@ -5,6 +5,11 @@
 #include <mutex>
 #include <thread>
 #include <array>
+#include <cstdio>
+#ifdef __linux__
+#include <sched.h>
+#include <fstream>
+#endif
 #include "host_stream_copy.h"
 #ifndef FHERMA_COPY_THREADS
 #define FHERMA_COPY_THREADS 4
@@ -58,7 +63,27 @@ class HostCopyPool {
     }
 public:
     HostCopyPool() {
-        try { for(unsigned i=0;i<Threads-1;++i) workers_[i]=std::thread([this,i] { worker(i); }); }
+        std::array<int,Threads-1> worker_cpus; worker_cpus.fill(-1);
+#ifdef __linux__
+        cpu_set_t allowed; int caller=sched_getcpu();
+        if(caller>=0 && sched_getaffinity(0,sizeof(allowed),&allowed)==0) {
+            unsigned found=0;
+            for(int cpu=0;cpu<CPU_SETSIZE && found<Threads-1;++cpu)
+                if(cpu!=caller && CPU_ISSET(cpu,&allowed)) worker_cpus[found++]=cpu;
+            cpu_set_t current; CPU_ZERO(&current); CPU_SET(caller,&current);
+            sched_setaffinity(0,sizeof(current),&current);
+        }
+        std::string quota,period;
+        std::ifstream("/sys/fs/cgroup/cpu.max")>>quota>>period;
+        std::fprintf(stderr,"COPY_POOL threads=%u main_cpu=%d worker0=%d cpu_max=%s/%s\n",
+                     Threads,caller,worker_cpus[0],quota.c_str(),period.c_str());
+#endif
+        try { for(unsigned i=0;i<Threads-1;++i) workers_[i]=std::thread([this,i,cpu=worker_cpus[i]] {
+#ifdef __linux__
+            if(cpu>=0) { cpu_set_t mask; CPU_ZERO(&mask); CPU_SET(cpu,&mask); sched_setaffinity(0,sizeof(mask),&mask); }
+#endif
+            worker(i);
+        }); }
         catch(...) { stop(); throw; }
     }
     ~HostCopyPool() { stop(); }
