@@ -1,3 +1,6 @@
+#ifndef FHERMA_HARVEY
+#define FHERMA_HARVEY 1
+#endif
 #ifndef FHERMA_CACHED_VECTOR
 #define FHERMA_CACHED_VECTOR 0
 #endif
@@ -193,7 +196,7 @@ __device__ inline void prepare_coefficient(const uint32_t* input,unsigned stride
     unsigned output_i=natural ? i : (__brev(i)>>(32-logn));
     #pragma unroll
     for(unsigned channel=0;channel<4;++channel)
-        ab[(poly*PrimeCount+channel*ModCount+pi)*n+output_i]=shoup(mixed[channel],twists[pi*n+i],p);
+        ab[(poly*PrimeCount+channel*ModCount+pi)*n+output_i]=FHERMA_HARVEY && n==32768 ? mixed[channel] : shoup(mixed[channel],twists[pi*n+i],p);
 }
 __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
                              const Twiddle* twists,const Twiddle* powers,const Roots* roots,unsigned n,unsigned logn,
@@ -424,6 +427,95 @@ template<bool Lazy> __global__ void tail_dif_rns(const uint32_t* source,uint32_t
         destination[row*Tile+column_base+column]=tile[column*(TailRows+1)+row];
     }
 }
+template<bool Inverse,bool Lazy> __device__ inline void harvey_pair(uint32_t& u,uint32_t& v,Twiddle w,uint32_t p) {
+    if constexpr(Inverse) {
+        uint32_t sum=ntt_add<Lazy>(u,v,p);
+        v=ntt_shoup<Lazy>(ntt_sub<Lazy>(u,v,p),w,p);u=sum;
+    } else {
+        v=ntt_shoup<Lazy>(v,w,p);
+        uint32_t sum=ntt_add<Lazy>(u,v,p);v=ntt_sub<Lazy>(u,v,p);u=sum;
+    }
+}
+template<bool Inverse> __device__ inline unsigned harvey_index(unsigned x) {
+    if constexpr(Inverse) return small_index(x);
+    return small_dif_index(x);
+}
+// Odd-root CT/GS butterflies: roots are indexed by group, not by lane.
+template<bool Inverse,bool Product,bool Lazy> __global__ void harvey_small(
+    uint32_t* values,const SmallMod* mods,const Twiddle* roots,unsigned n,const uint32_t* paired=nullptr,unsigned logn=0) {
+    __shared__ uint32_t tile[Tile];
+    unsigned t=threadIdx.x,pi=blockIdx.y%ModCount,begin=blockIdx.x*Tile;
+    values+=blockIdx.y*n+begin;roots+=pi*n;
+    SmallMod modulus=mods[pi];uint32_t p=modulus.p;
+    #pragma unroll
+    for(unsigned k=0;k<8;++k) tile[harvey_index<Inverse>(t+k*Tile/8)]=small_value<Product>(values,paired,t+k*Tile/8,begin,blockIdx.y,n,logn,modulus);
+    __syncthreads();
+    #pragma unroll
+    for(unsigned pass=0;pass<3;++pass) {
+        unsigned half=Inverse ? (1u<<(3*pass)) : (128u>>(3*pass));
+        unsigned j=t&(half-1),i=8*(t-j)+j;uint32_t x[8];
+        #pragma unroll
+        for(unsigned k=0;k<8;++k) x[k]=tile[harvey_index<Inverse>(i+k*half)];
+        #pragma unroll
+        for(unsigned phase=0;phase<3;++phase) {
+            unsigned step=Inverse ? (1u<<phase) : (4u>>phase),h=step*half;
+            #pragma unroll
+            for(unsigned group=0;group<8;group+=2*step) {
+                Twiddle w=roots[n/(2*h)+(begin+i+group*half)/(2*h)];
+                #pragma unroll
+                for(unsigned lane=0;lane<step;++lane)
+                    harvey_pair<Inverse,Lazy>(x[group+lane],x[group+lane+step],w,p);
+            }
+        }
+        #pragma unroll
+        for(unsigned k=0;k<8;++k) tile[harvey_index<Inverse>(i+k*half)]=x[k];
+        __syncthreads();
+    }
+    #pragma unroll
+    for(unsigned k=0;k<4;++k) {
+        unsigned j=t+k*Tile/8,i=Inverse ? j : 2*j,h=Inverse ? Tile/2 : 1;
+        uint32_t u=tile[harvey_index<Inverse>(i)],v=tile[harvey_index<Inverse>(i+h)];
+        harvey_pair<Inverse,Lazy>(u,v,roots[n/(2*h)+(begin+i)/(2*h)],p);
+        values[i]=u;values[i+h]=v;
+    }
+}
+template<bool Inverse,bool Lazy> __global__ void harvey_tail(const uint32_t* source,uint32_t* destination,
+    const SmallMod* mods,const Twiddle* roots,unsigned n) {
+    __shared__ uint32_t tile[TailColumns*(TailRows+1)];
+    unsigned t=threadIdx.x,pi=blockIdx.y%ModCount,column_base=blockIdx.x*TailColumns;
+    source+=blockIdx.y*n;destination+=blockIdx.y*n;roots+=pi*n;
+    #pragma unroll
+    for(unsigned index=t;index<256;index+=128) {
+        unsigned row=index/TailColumns,column=index%TailColumns;
+        tile[column*(TailRows+1)+row]=source[row*Tile+column_base+column];
+    }
+    __syncthreads();
+    unsigned k=t%(TailRows/2),offset=(t/(TailRows/2))*(TailRows+1);
+    unsigned first=Inverse ? 2*k : k,delta=Inverse ? 1 : TailRows/2;
+    uint32_t lower=tile[offset+first],upper=tile[offset+first+delta],p=mods[pi].p;
+    harvey_pair<Inverse,Lazy>(lower,upper,roots[Inverse ? TailRows/2+k : 1],p);
+    #pragma unroll
+    for(unsigned phase=0;phase<4;++phase) {
+        unsigned half=Inverse ? (2u<<phase) : (8u>>phase),mask=Inverse ? half/2 : half;
+        uint32_t peer_lower=__shfl_xor_sync(0xffffffff,lower,mask,TailRows/2);
+        uint32_t peer_upper=__shfl_xor_sync(0xffffffff,upper,mask,TailRows/2);
+        uint32_t u=(k&mask) ? peer_upper : lower,v=(k&mask) ? upper : peer_lower;
+        harvey_pair<Inverse,Lazy>(u,v,roots[TailRows/(2*half)+k/half],p);
+        lower=u;upper=v;
+    }
+    if constexpr(Inverse) {
+        unsigned output=column_base*TailRows+(t/(TailRows/2))*TailRows+k;
+        destination[output]=lower;destination[output+TailRows/2]=upper;
+    } else {
+        tile[offset+2*k]=lower;tile[offset+2*k+1]=upper;
+        __syncthreads();
+        #pragma unroll
+        for(unsigned index=t;index<256;index+=128) {
+            unsigned row=index/TailColumns,column=index%TailColumns;
+            destination[row*Tile+column_base+column]=tile[column*(TailRows+1)+row];
+        }
+    }
+}
 template<bool Lazy> __global__ void stage_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,
                            unsigned n,unsigned half,unsigned stride) {
     unsigned k=blockIdx.x*blockDim.x+threadIdx.x;
@@ -556,9 +648,9 @@ template<bool Lazy> __global__ void reconstruct_rns(const uint32_t* residues,uin
         }
         #if FHERMA_QUARTIC_COMPACT_SCALE
         uint32_t normalized=shoup(mixed,roots[pi].inverse_powers[component],p);
-        uint32_t t=shoup(normalized,scales[pi*n+i],p);
+        uint32_t t=shoup(normalized,scales[FHERMA_HARVEY && n==32768 ? pi : pi*n+i],p);
 #else
-        uint32_t t=shoup(mixed,scales[(component*ModCount+pi)*n+i],p);
+        uint32_t t=shoup(mixed,scales[FHERMA_HARVEY && n==32768 ? component*ModCount+pi : (component*ModCount+pi)*n+i],p);
 #endif
         uint64_t term=uint64_t(t)*modulus.reciprocal,next=fraction+term;
         alpha+=next<fraction;fraction=next;
@@ -678,6 +770,7 @@ void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stre
 template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
     bool dif_forward=FHERMA_DIF_FORWARD && s.n==32768;
+    bool harvey=FHERMA_HARVEY && s.n==32768;
     uint32_t* prepared=s.ab;
     if(s.overlap_input) {
       if(!dif_forward) {
@@ -700,8 +793,13 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
     uint32_t* forward_values=prepared;
     if(dif_forward) {
         dim3 tails(128,2*PrimeCount),tiles(s.n/Tile,2*PrimeCount);
+        if(harvey) {
+            harvey_tail<false,Lazy><<<tails,128,0,stream>>>(prepared,s.scratch,s.mods,s.forward,s.n);
+            harvey_small<false,false,Lazy><<<tiles,Tile/8,0,stream>>>(s.scratch,s.mods,s.forward,s.n);
+        } else {
         tail_dif_rns<Lazy><<<tails,128,0,stream>>>(prepared,s.scratch,s.mods,s.tail_forward,s.n);
         small_dif_rns<Lazy><<<tiles,Tile/8,0,stream>>>(s.scratch,s.mods,s.small_forward,s.n);
+        }
         forward_values=s.scratch;
         first=Tile;
     } else {
@@ -730,15 +828,24 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
     mark(s,4,stream);
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,PrimeCount);
+        if(harvey) {
+            if(fused_product)
+                harvey_small<true,true,Lazy><<<tiles,Tile/8,0,stream>>>(s.c,s.mods,s.inverse,s.n,forward_values,s.logn);
+            else
+                harvey_small<true,false,Lazy><<<tiles,Tile/8,0,stream>>>(s.c,s.mods,s.inverse,s.n);
+        } else {
         if(fused_product)
             small_rns<true,Lazy><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n,forward_values,s.logn);
         else
             small_rns<false,Lazy><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
+        }
     }
     uint32_t* inverse_values=s.c;
     if(FHERMA_RNS_TAIL && s.n==32768) {
         dim3 transposes(Tile/32,PrimeCount),tails(128,PrimeCount);
-        if(FHERMA_RNS_FUSED_TRANSPOSE) {
+        if(harvey) {
+            harvey_tail<true,Lazy><<<tails,128,0,stream>>>(s.c,s.ab,s.mods,s.inverse,s.n);
+        } else if(FHERMA_RNS_FUSED_TRANSPOSE) {
             fused_tail_rns<Lazy><<<tails,128,0,stream>>>(s.c,s.ab,s.mods,s.tail_inverse,s.n);
         } else {
             transpose_rns<<<transposes,256,0,stream>>>(s.c,s.ab,s.n);
@@ -772,6 +879,7 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments fit the smallest point");
     static_assert(!FHERMA_MAPPED_OUTPUT || FHERMA_PIPELINE_OUTPUT==1,"mapped output waits for the complete CRT kernel");
     static_assert(!(FHERMA_OUTPUT_APPEND && FHERMA_OUTPUT_SPARE),"choose one output construction experiment");
+    static_assert(!FHERMA_HARVEY || (Tile==1024 && FHERMA_RNS_RADIX8 && FHERMA_DIF_FORWARD && FHERMA_RNS_TAIL),"Harvey uses natural input and 1024-element radix-8 tiles");
     pin_near_gpu();
 #if FHERMA_HOST_PROFILE && defined(__linux__)
     std::string thp_policy;
@@ -803,7 +911,20 @@ void* fherma_init(const fherma::Point& p) {
     upload(s->product,constants.product);upload(s->q,p.q.data);
     constexpr unsigned ScaleCount=FHERMA_QUARTIC_COMPACT_SCALE ? quartic::ModCount : quartic::PrimeCount;
     constants.scale.resize(size_t(ScaleCount)*p.N);
-    if(FHERMA_RNS_TAIL && p.N==32768) {
+    if(FHERMA_HARVEY && p.N==32768) {
+        std::vector<Twiddle> compact(ScaleCount);
+        for(unsigned row=0;row<ScaleCount;++row) compact[row]=constants.scale[row*p.N];
+        constants.scale=std::move(compact);
+        auto forward=constants.forward,inverse=constants.inverse;
+        for(unsigned i=0;i<p.N;++i) {
+            unsigned reversed=0,value=i;
+            for(unsigned bit=0;bit<s->logn;++bit) {reversed=(reversed<<1)|(value&1);value>>=1;}
+            for(unsigned pi=0;pi<ModCount;++pi) {
+                constants.forward[pi*p.N+i]=forward[pi*p.N+reversed];
+                constants.inverse[pi*p.N+i]=inverse[pi*p.N+reversed];
+            }
+        }
+    } else if(FHERMA_RNS_TAIL && p.N==32768) {
         auto original=constants.scale;
         for(unsigned pi=0;pi<ScaleCount;++pi)
             for(unsigned i=0;i<p.N;++i)
