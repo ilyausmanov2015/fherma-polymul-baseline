@@ -1,8 +1,8 @@
 {
   "kind": "official-fherma-best-challenge",
-  "run_id": "6aabe7b2e3bdd1a5530bbb83",
-  "commit": "e064b5297c97c34a4c31b8840b691c6623b171bc",
-  "url": "https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aabe7b2e3bdd1a5530bbb83",
+  "run_id": "6aabec9ee3bdd1a5530bfb81",
+  "commit": "d155c4f6142b9cf88a5a94b39d958a9026053cba",
+  "url": "https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aabec9ee3bdd1a5530bfb81",
   "status": "finished",
   "cases": 20,
   "passed": 20,
@@ -15,7 +15,7 @@
       "cores": 24,
       "memory_gb": 214,
       "memory_cap_gb": 200,
-      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition \u00b7 97887 MiB",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition · 97887 MiB",
       "gpu_memory_gb": 95.6,
       "cpu": "Intel(R) Xeon(R) 6776P",
       "kernel": "6.11.0-1016-nvidia",
@@ -28,15 +28,15 @@
       "seeds": 20,
       "passed": 20,
       "seconds": {
-        "min": 0.000576038,
-        "median": 0.0005970274999999999,
-        "mean": 0.0005997651500000001,
-        "max": 0.00063284
+        "min": 0.000502782,
+        "median": 0.00051393,
+        "mean": 0.0005149859,
+        "max": 0.000531737
       },
       "memory_mb": {
-        "min": 153.6,
-        "median": 153.6,
-        "max": 153.6
+        "min": 154.1,
+        "median": 154.1,
+        "max": 154.1
       }
     }
   ]
