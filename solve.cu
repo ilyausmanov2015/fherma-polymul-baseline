@@ -1,5 +1,8 @@
+#ifndef FHERMA_SPIN_COPY
+#define FHERMA_SPIN_COPY 1
+#endif
 #ifndef FHERMA_DIRECT_OUTPUT
-#define FHERMA_DIRECT_OUTPUT 1
+#define FHERMA_DIRECT_OUTPUT 0
 #endif
 #ifndef FHERMA_GRAPH
 #define FHERMA_GRAPH 1

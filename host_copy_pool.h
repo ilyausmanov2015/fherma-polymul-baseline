@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #ifdef __linux__
 #include <sched.h>
@@ -15,7 +16,10 @@
 #define FHERMA_COPY_THREADS 4
 #endif
 
-// Sleeping workers plus the caller. Input-dependent copying remains
+#ifndef FHERMA_SPIN_COPY
+#define FHERMA_SPIN_COPY 0
+#endif
+// Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
     static constexpr unsigned Threads=FHERMA_COPY_THREADS;
@@ -26,6 +30,20 @@ class HostCopyPool {
     std::array<std::thread,Threads-1> workers_;
     unsigned generation_=0,pending_=0;
     bool stop_=false;
+#if FHERMA_SPIN_COPY
+    alignas(64) std::atomic<unsigned> spin_generation_{0};
+    alignas(64) std::atomic<unsigned> spin_pending_{0};
+    alignas(64) std::atomic<bool> spin_stop_{false};
+    static void pause() {
+#if defined(__x86_64__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        asm volatile("yield");
+#else
+        std::this_thread::yield();
+#endif
+    }
+#endif
     static void part(const Job& job,unsigned rank) {
         if(job.b) {
             unsigned half=rank%(Threads/2);
@@ -40,6 +58,15 @@ class HostCopyPool {
     }
     void worker(unsigned rank) {
         unsigned seen=0;
+#if FHERMA_SPIN_COPY
+        while(!spin_stop_.load(std::memory_order_relaxed)) {
+            unsigned generation=spin_generation_.load(std::memory_order_acquire);
+            if(generation==seen) { pause(); continue; }
+            auto job=job_; seen=generation;
+            part(job,rank);
+            spin_pending_.fetch_sub(1,std::memory_order_release);
+        }
+#else
         std::unique_lock<std::mutex> lock(mutex_);
         for(;;) {
             start_.wait(lock,[&] { return stop_ || generation_!=seen; });
@@ -48,17 +75,30 @@ class HostCopyPool {
             lock.unlock(); part(job,rank); lock.lock();
             if(--pending_==0) done_.notify_one();
         }
+#endif
     }
     void stop() {
+#if FHERMA_SPIN_COPY
+        spin_stop_.store(true,std::memory_order_relaxed);
+#else
         { std::lock_guard<std::mutex> lock(mutex_); stop_=true; }
         start_.notify_all();
+#endif
         for(auto& thread:workers_) if(thread.joinable()) thread.join();
     }
     void run(Job job) {
+#if FHERMA_SPIN_COPY
+        job_=job;
+        spin_pending_.store(Threads-1,std::memory_order_relaxed);
+        spin_generation_.fetch_add(1,std::memory_order_release);
+        part(job,Threads-1);
+        while(spin_pending_.load(std::memory_order_acquire)) pause();
+#else
         { std::lock_guard<std::mutex> lock(mutex_); job_=job; pending_=Threads-1; ++generation_; }
         start_.notify_all(); part(job,Threads-1);
         std::unique_lock<std::mutex> lock(mutex_);
         done_.wait(lock,[&] { return pending_==0; });
+#endif
         job_={};
     }
 public:

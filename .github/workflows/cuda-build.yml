@@ -27,6 +27,12 @@ jobs:
         run: |
           g++ -O2 -std=c++17 -I. tests/host_copy.cpp -o /tmp/host-copy-check
           /tmp/host-copy-check
+      - name: Check persistent copy handoff
+        run: |
+          for mode in 0 1; do
+            g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=2 -DFHERMA_SPIN_COPY=$mode -DFHERMA_STREAM_COPY=1 tests/host_copy_pool.cpp -o /tmp/host-pool-check
+            /tmp/host-pool-check
+          done
       - name: Install NVIDIA cuPQC 0.6.0
         run: |
           curl -fsSL --retry 2 https://developer.nvidia.com/downloads/compute/cupqc/downloads/secure/cupqc-sdk-0.6.0-x86_64.tar.gz -o /tmp/cupqc.tar.gz
