@@ -1,5 +1,8 @@
+#ifndef FHERMA_RNS_RADIX4
+#define FHERMA_RNS_RADIX4 1
+#endif
 #ifndef FHERMA_RNS_GROUPED
-#define FHERMA_RNS_GROUPED 1
+#define FHERMA_RNS_GROUPED 0
 #endif
 #ifndef FHERMA_CRT_PARTS
 #define FHERMA_CRT_PARTS 1
@@ -119,6 +122,28 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
     values+=blockIdx.y*n+blockIdx.x*Tile;
     tables+=prime_i*Tile;
     uint32_t p=mods[prime_i].p;
+#if FHERMA_RNS_RADIX4
+    #pragma unroll
+    for(unsigned k=0;k<4;++k) tile[t+k*Tile/4]=values[t+k*Tile/4];
+    __syncthreads();
+    for(unsigned half=1;half<Tile;half*=4) {
+        unsigned j=t&(half-1),i=4*(t-j)+j;
+        uint32_t x0=tile[i],x1=tile[i+half],x2=tile[i+2*half],x3=tile[i+3*half];
+        if(j!=0) {
+            Twiddle w=tables[j*(Tile/half)];
+            x1=shoup(x1,w,p);x3=shoup(x3,w,p);
+        }
+        uint32_t a0=add_mod(x0,x1,p),a1=sub_mod(x0,x1,p);
+        uint32_t a2=add_mod(x2,x3,p),a3=sub_mod(x2,x3,p);
+        if(j!=0) a2=shoup(a2,tables[j*(Tile/(2*half))],p);
+        a3=shoup(a3,tables[(j+half)*(Tile/(2*half))],p);
+        tile[i]=add_mod(a0,a2,p);tile[i+2*half]=sub_mod(a0,a2,p);
+        tile[i+half]=add_mod(a1,a3,p);tile[i+3*half]=sub_mod(a1,a3,p);
+        __syncthreads();
+    }
+    #pragma unroll
+    for(unsigned k=0;k<4;++k) values[t+k*Tile/4]=tile[t+k*Tile/4];
+#else
     tile[t]=values[t];tile[t+Tile/2]=values[t+Tile/2];
     __syncthreads();
     unsigned stride=Tile;
@@ -129,6 +154,7 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
         __syncthreads();
     }
     values[t]=tile[t];values[t+Tile/2]=tile[t+Tile/2];
+#endif
 }
 __global__ void stage_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,
                            unsigned n,unsigned half,unsigned stride) {
@@ -310,7 +336,7 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     unsigned first=1;
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,2*PrimeCount);
-        small_rns<<<tiles,Tile/2,0,stream>>>(s.ab,s.mods,s.small_forward,s.n);
+        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX4?4:2),0,stream>>>(s.ab,s.mods,s.small_forward,s.n);
         first=Tile;
     }
     uint32_t* forward_values=s.ab;
@@ -327,7 +353,7 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     mark(s,4,stream);
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,PrimeCount);
-        small_rns<<<tiles,Tile/2,0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
+        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX4?4:2),0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
     }
     uint32_t* inverse_values=s.c;
     if(FHERMA_RNS_TAIL && s.n==32768) {
