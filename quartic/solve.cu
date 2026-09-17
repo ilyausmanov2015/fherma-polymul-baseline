@@ -56,7 +56,7 @@
 #define FHERMA_PREPARE_PRIMES 16
 #endif
 #ifndef FHERMA_HARVEY_BITS
-#define FHERMA_HARVEY_BITS 3
+#define FHERMA_HARVEY_BITS 4
 #endif
 #ifndef FHERMA_HARVEY
 #define FHERMA_HARVEY 1
