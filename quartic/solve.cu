@@ -1,11 +1,14 @@
 #ifndef FHERMA_INPUT_GRAPH
-#define FHERMA_INPUT_GRAPH 0
+#define FHERMA_INPUT_GRAPH 1
+#endif
+#ifndef FHERMA_INPUT_GRAPH_EARLY
+#define FHERMA_INPUT_GRAPH_EARLY 0
 #endif
 #ifndef FHERMA_ASYNC_OUTPUT_LATE
 #define FHERMA_ASYNC_OUTPUT_LATE 1
 #endif
 #ifndef FHERMA_INPUT_WORKER_PIPELINE
-#define FHERMA_INPUT_WORKER_PIPELINE 0
+#define FHERMA_INPUT_WORKER_PIPELINE 1
 #endif
 #ifndef FHERMA_OUTPUT_WORKER_PIPELINE
 #define FHERMA_OUTPUT_WORKER_PIPELINE 0
@@ -41,7 +44,7 @@
 #define FHERMA_CRT_PIPELINE 0
 #endif
 #ifndef FHERMA_PREPARE_PRIMES
-#define FHERMA_PREPARE_PRIMES 16
+#define FHERMA_PREPARE_PRIMES 4
 #endif
 #ifndef FHERMA_HARVEY_BITS
 #define FHERMA_HARVEY_BITS 3
@@ -50,7 +53,7 @@
 #define FHERMA_HARVEY 1
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 0
+#define FHERMA_OUTPUT_GRAPH 1
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -107,7 +110,7 @@
 #define FHERMA_MAPPED_OUTPUT 0
 #endif
 #ifndef FHERMA_MAPPED_INPUT
-#define FHERMA_MAPPED_INPUT 1
+#define FHERMA_MAPPED_INPUT 0
 #endif
 #ifndef FHERMA_QUARTIC_COMPACT_SCALE
 #define FHERMA_QUARTIC_COMPACT_SCALE 0
@@ -122,7 +125,7 @@
 #define FHERMA_RNS_TILED_PREPARE 1
 #endif
 #ifndef FHERMA_INPUT_WC
-#define FHERMA_INPUT_WC 1
+#define FHERMA_INPUT_WC 0
 #endif
 #ifndef FHERMA_STREAM_OUTPUT
 #define FHERMA_STREAM_OUTPUT 0
@@ -1250,7 +1253,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_OUTPUT_SIGNAL
         s.completion.begin();
 #endif
-        check(cudaGraphLaunch(s.graph,s.stream),"execute complete input/output graph");
+        if(FHERMA_INPUT_GRAPH_EARLY) check(cudaGraphLaunch(s.graph,s.stream),"execute complete input/output graph");
     }
 #endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_INPUT>1
@@ -1258,7 +1261,12 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,input.a.data.data(),input.b.data.data(),words,
         [&](size_t begin,const uint32_t* a,const uint32_t* b,size_t count) {
 #if defined(__CUDACC__) && FHERMA_INPUT_GRAPH
-            if(s.input_graph) {s.input_completion.publish(input_part++);return;}
+            if(s.input_graph) {
+                unsigned part=input_part++;s.input_completion.publish(part);
+                if(!FHERMA_INPUT_GRAPH_EARLY && part==0)
+                    check(cudaGraphLaunch(s.graph,s.stream),"execute graph after first input publication");
+                return;
+            }
 #endif
             if(FHERMA_MAPPED_INPUT && s.overlap_input) {
                 check(cudaGraphLaunch(s.prepare_graph[input_part],s.stream),"execute mapped input chunk");
