@@ -57,6 +57,12 @@ jobs:
           /tmp/idle-pool-check
           g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=4 -DFHERMA_OUTPUT_THREADS=2 -DFHERMA_SPIN_COPY=1 -DFHERMA_COPY_ACKS=1 -DFHERMA_ASYNC_INPUT=1 -DFHERMA_UMWAIT=1 tests/input_pipeline.cpp -o /tmp/idle-input-check
           /tmp/idle-input-check
+      - name: Check physical core placement and copy ownership
+        run: |
+          g++ -O2 -std=c++17 -I. tests/host_cpu_topology.cpp -o /tmp/core-order-check
+          /tmp/core-order-check
+          g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=4 -DFHERMA_OUTPUT_THREADS=2 -DFHERMA_SPIN_COPY=1 -DFHERMA_COPY_ACKS=1 -DFHERMA_MAIN_OUTPUT=1 -DFHERMA_PHYSICAL_CORES=1 tests/host_copy_pool.cpp -o /tmp/physical-pool-check
+          /tmp/physical-pool-check
       - name: Check CUDA helper affinity inheritance
         run: |
           g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=2 -DFHERMA_DEFER_MAIN_PIN=1 tests/deferred_affinity.cpp -o /tmp/affinity-check

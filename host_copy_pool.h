@@ -13,6 +13,7 @@
 #include <fstream>
 #endif
 #include "host_stream_copy.h"
+#include "host_cpu_topology.h"
 #ifndef FHERMA_COPY_THREADS
 #define FHERMA_COPY_THREADS 4
 #endif
@@ -56,6 +57,9 @@
 #endif
 #ifndef FHERMA_UMWAIT
 #define FHERMA_UMWAIT 0
+#endif
+#ifndef FHERMA_PHYSICAL_CORES
+#define FHERMA_PHYSICAL_CORES 0
 #endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
@@ -319,8 +323,27 @@ public:
                 if(CPU_ISSET(cpu,&allowed)) { caller=cpu;break; }
 #endif
             unsigned found=0;
+#if FHERMA_PHYSICAL_CORES
+            std::vector<HostCpuCore> topology;
+            for(int cpu=0;cpu<CPU_SETSIZE;++cpu) if(CPU_ISSET(cpu,&allowed)) {
+                HostCpuCore record{cpu,-1,-1};
+                std::string path="/sys/devices/system/cpu/cpu"+std::to_string(cpu)+"/topology/";
+                std::ifstream(path+"physical_package_id")>>record.package;
+                std::ifstream(path+"core_id")>>record.core;
+                topology.push_back(record);
+            }
+            for(int cpu:host_worker_cpu_order(topology,caller)) {
+                if(found==Workers) break;
+                worker_cpus[found++]=cpu;
+            }
+#else
             for(int cpu=0;cpu<CPU_SETSIZE && found<Workers;++cpu)
                 if(cpu!=caller && CPU_ISSET(cpu,&allowed)) worker_cpus[found++]=cpu;
+#endif
+#if FHERMA_HOST_PROFILE
+            for(unsigned rank=0;rank<Workers;++rank)
+                std::fprintf(stderr,"COPY_PLACEMENT rank=%u cpu=%d\n",rank,worker_cpus[rank]);
+#endif
             caller_cpu_=caller;
 #if !FHERMA_DEFER_MAIN_PIN
             pin_caller();
