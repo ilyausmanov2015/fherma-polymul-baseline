@@ -1,5 +1,8 @@
+#ifndef FHERMA_MAPPED_OUTPUT
+#define FHERMA_MAPPED_OUTPUT 1
+#endif
 #ifndef FHERMA_MAPPED_INPUT
-#define FHERMA_MAPPED_INPUT 1
+#define FHERMA_MAPPED_INPUT 0
 #endif
 #ifndef FHERMA_QUARTIC_COMPACT_SCALE
 #define FHERMA_QUARTIC_COMPACT_SCALE 0
@@ -26,7 +29,7 @@
 #define FHERMA_PIPELINE_INPUT 4
 #endif
 #ifndef FHERMA_PIPELINE_OUTPUT
-#define FHERMA_PIPELINE_OUTPUT 4
+#define FHERMA_PIPELINE_OUTPUT 1
 #endif
 #ifndef FHERMA_RNS_RADIX4
 #define FHERMA_RNS_RADIX4 1
@@ -470,7 +473,7 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
         stage_rns<<<inverse_half,128,0,stream>>>(s.c,s.mods,s.inverse,s.n,h,s.n/h);
     mark(s,5,stream);
     unsigned crt_blocks=(s.n+CrtOutputs-1)/CrtOutputs;
-    reconstruct_rns<<<crt_blocks,128,0,stream>>>(inverse_values,s.input,s.mods,s.scale,s.bases,s.roots,
+    reconstruct_rns<<<crt_blocks,128,0,stream>>>(inverse_values,FHERMA_MAPPED_OUTPUT ? s.host_output : s.input,s.mods,s.scale,s.bases,s.roots,
                                             s.q,s.product,s.n);
     mark(s,6,stream);
     check(cudaGetLastError(),"RNS kernels");
@@ -487,6 +490,7 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(!FHERMA_PROFILE || (FHERMA_PIPELINE_INPUT<=1 && FHERMA_PIPELINE_OUTPUT<=1),
                   "profile arithmetic separately from overlapped host transfers");
     static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments fit the smallest point");
+    static_assert(!FHERMA_MAPPED_OUTPUT || FHERMA_PIPELINE_OUTPUT==1,"mapped output waits for the complete CRT kernel");
     pin_near_gpu();
 #ifdef __CUDACC__
     int device=0,pageable=0,host_tables=0,concurrent=0,direct=0;
@@ -496,10 +500,10 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaDeviceGetAttribute(&concurrent,cudaDevAttrConcurrentManagedAccess,device),"query concurrent managed access");
     check(cudaDeviceGetAttribute(&direct,cudaDevAttrDirectManagedMemAccessFromHost,device),"query direct host access");
     std::fprintf(stderr,"MEMORY_CAPS pageable=%d host_tables=%d concurrent=%d direct=%d\n",pageable,host_tables,concurrent,direct);
-    if(FHERMA_MAPPED_INPUT) {
+    if(FHERMA_MAPPED_INPUT || FHERMA_MAPPED_OUTPUT) {
         int unified=0;
         check(cudaDeviceGetAttribute(&unified,cudaDevAttrUnifiedAddressing,device),"query UVA for pinned input");
-        if(!unified) throw std::runtime_error("mapped pinned input requires unified addressing");
+        if(!unified) throw std::runtime_error("mapped pinned buffers require unified addressing");
     }
 #endif
     auto s=std::make_unique<State>();s->n=p.N;s->logn=__builtin_ctz(p.N);
@@ -576,7 +580,7 @@ void* fherma_init(const fherma::Point& p) {
 #endif
     mark(*s,1,s->stream);
     launch_rns(*s,s->stream);
-#if FHERMA_PIPELINE_OUTPUT<=1
+#if FHERMA_PIPELINE_OUTPUT<=1 && !FHERMA_MAPPED_OUTPUT
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture RNS D2H");
 #endif
     mark(*s,7,s->stream);
@@ -651,7 +655,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #elif FHERMA_GRAPH
         check(cudaStreamSynchronize(s.stream),"RNS output ready");
 #else
-        check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"RNS D2H");
+        if(!FHERMA_MAPPED_OUTPUT) check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"RNS D2H");
         mark(s,7);
         check(cudaDeviceSynchronize(),"RNS diagnostic events ready");
 #endif
