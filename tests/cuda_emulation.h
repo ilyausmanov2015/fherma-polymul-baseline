@@ -30,11 +30,22 @@ namespace cupqc {
 template<unsigned N> struct BitWidth {};
 template<unsigned N> struct SM {};
 struct Thread {};
+struct EmulatedWide;
 struct EmulatedBig {
     mpz_class v;
     explicit EmulatedBig(uint32_t x):v(x){}
     EmulatedBig(const uint32_t* p,unsigned i) { mpz_import(v.get_mpz_t(),28,-1,4,0,0,p+i*28); }
     explicit EmulatedBig(mpz_class x):v(std::move(x)){}
+    static mpz_class mask() { return (mpz_class(1)<<896)-1; }
+    uint32_t operator[](unsigned k) const { mpz_class x=v>>(k*32); return uint32_t(x.get_ui()); }
+    EmulatedBig operator<<(unsigned n) const { return EmulatedBig(mpz_class((v<<n)&mask())); }
+    EmulatedBig operator>>(unsigned n) const { return EmulatedBig(mpz_class(v>>n)); }
+    EmulatedBig operator|(const EmulatedBig& b) const { return EmulatedBig(mpz_class(v|b.v)); }
+    EmulatedBig operator+(const EmulatedBig& b) const { return EmulatedBig(mpz_class((v+b.v)&mask())); }
+    EmulatedBig operator-(const EmulatedBig& b) const { return EmulatedBig(mpz_class((v-b.v)&mask())); }
+    bool operator>=(const EmulatedBig& b) const { return v>=b.v; }
+    EmulatedBig mul_scalar(uint32_t b) const { return EmulatedBig(mpz_class((v*b)&mask())); }
+    EmulatedWide mul_wide(const EmulatedBig& b) const;
     void store(uint32_t* p,unsigned i) const {
         std::memset(p+i*28,0,112); mpz_export(p+i*28,nullptr,-1,4,0,0,v.get_mpz_t());
     }
@@ -48,6 +59,11 @@ struct EmulatedBig {
         return EmulatedBig(mpz_class((v-b.v+q.v)%q.v));
     }
 };
+struct EmulatedWide { EmulatedBig lo,hi; };
+inline EmulatedWide EmulatedBig::mul_wide(const EmulatedBig& b) const {
+    mpz_class p=v*b.v;
+    return {EmulatedBig(mpz_class(p&mask())),EmulatedBig(mpz_class(p>>896))};
+}
 struct Descriptor { using bigint=EmulatedBig; };
 template<unsigned W,unsigned S> Descriptor operator+(BitWidth<W>,SM<S>){return {};}
 inline Descriptor operator+(Descriptor,Thread){return {};}

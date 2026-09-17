@@ -9,6 +9,23 @@ namespace {
 constexpr unsigned L=28;
 using BI=decltype(cupqc::BitWidth<L*32>()+cupqc::SM<800>()+cupqc::Thread());
 using Big=typename BI::bigint;
+// For q = 2^868-c, c < 2^28, a full product folds twice without division.
+// At each fold all intermediates fit the 896-bit cuPQC storage width.
+// q is supplied at setup; other moduli retain the general implementation.
+__device__ Big multiply(const Big& a,const Big& b,const Big& q) {
+    const uint32_t c=uint32_t(0)-q[0];
+    bool special=c>0 && c<0x10000000u && q[27]==15u;
+    #pragma unroll
+    for(unsigned k=1;k<27;++k) special=special && q[k]==0xffffffffu;
+    if(!special) return a.mul_mod(b,q);
+    auto p=a.mul_wide(b);
+    Big low=(p.lo<<28)>>28;
+    Big high=(p.lo>>868)|(p.hi<<28);
+    Big t=low+high.mul_scalar(c);
+    Big r=((t<<28)>>28)+(t>>868).mul_scalar(c);
+    if(r>=q) r=r-q;
+    return r;
+}
 void check(cudaError_t e,const char* op) {
     if(e!=cudaSuccess) throw std::runtime_error(std::string(op)+": "+cudaGetErrorString(e));
 }
@@ -21,7 +38,7 @@ struct State {
 };
 __device__ Big pow_small(Big x,unsigned e,const Big& q) {
     Big y(uint32_t(1));
-    while(e) { if(e&1) y=y.mul_mod(x,q); e>>=1; if(e) x=x.mul_mod(x,q); }
+    while(e) { if(e&1) y=multiply(y,x,q); e>>=1; if(e) x=multiply(x,x,q); }
     return y;
 }
 __global__ void make_tables(const uint32_t* qp,const uint32_t* roots,
@@ -30,7 +47,7 @@ __global__ void make_tables(const uint32_t* qp,const uint32_t* roots,
     if(i>=n) return;
     const Big q(qp,0), psi(roots,0), invpsi(roots,1), invn(roots,2);
     auto a=pow_small(psi,i,q), b=pow_small(invpsi,i,q);
-    a.store(twist,i); b.store(inv_twist,i); b.mul_mod(invn,q).store(scale,i);
+    a.store(twist,i); b.store(inv_twist,i); multiply(b,invn,q).store(scale,i);
 }
 __global__ void prepare(const uint32_t* input,uint32_t* ab,const uint32_t* twist,
                         const uint32_t* qp,unsigned n,unsigned logn) {
@@ -38,7 +55,7 @@ __global__ void prepare(const uint32_t* input,uint32_t* ab,const uint32_t* twist
     if(i>=n) return;
     unsigned poly=blockIdx.y, j=__brev(i)>>(32-logn);
     const Big q(qp,0), x(input,poly*n+i), t(twist,i);
-    x.mul_mod(t,q).store(ab,poly*n+j);
+    multiply(x,t,q).store(ab,poly*n+j);
 }
 __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
                       unsigned n,unsigned half) {
@@ -46,7 +63,7 @@ __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
     if(k>=n/2) return;
     unsigned j=k&(half-1), i=2*(k-j)+j+blockIdx.y*n;
     const Big q(qp,0), u(values,i), v(values,i+half), tw(table,j*(n/half));
-    auto t=v.mul_mod(tw,q);
+    auto t=multiply(v,tw,q);
     u.add_mod(t,q).store(values,i); u.sub_mod(t,q).store(values,i+half);
 }
 __global__ void product(const uint32_t* ab,uint32_t* c,const uint32_t* qp,
@@ -54,13 +71,13 @@ __global__ void product(const uint32_t* ab,uint32_t* c,const uint32_t* qp,
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     const Big q(qp,0), a(ab,i), b(ab,n+i);
-    a.mul_mod(b,q).store(c,__brev(i)>>(32-logn));
+    multiply(a,b,q).store(c,__brev(i)>>(32-logn));
 }
 __global__ void finish(uint32_t* c,const uint32_t* scale,const uint32_t* qp,unsigned n) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     const Big q(qp,0), x(c,i), s(scale,i);
-    x.mul_mod(s,q).store(c,i);
+    multiply(x,s,q).store(c,i);
 }
 } // namespace
 
