@@ -1,8 +1,13 @@
 #pragma once
 #include "rns/host_setup.h"
+#ifndef FHERMA_QUARTIC_TILE
+#define FHERMA_QUARTIC_TILE 4096
+#endif
 namespace quartic {
 constexpr unsigned ModCount=16,Components=4,PrimeCount=ModCount*Components;
-constexpr unsigned AbiWords=28,PartBits=217,PartWords=7,WideWords=16,Tile=1024;
+constexpr unsigned AbiWords=28,PartBits=217,PartWords=7,WideWords=16,Tile=FHERMA_QUARTIC_TILE;
+constexpr unsigned TailRows=32768/Tile,TailColumns=256/TailRows;
+static_assert(Tile==1024 || Tile==4096,"supported quartic NTT tiles");
 using rns::Words;using rns::SmallMod;using rns::Twiddle;
 using rns::pow_mod;using rns::twiddle;
 struct Roots { Twiddle powers[4],i,inverse_powers[4]; };

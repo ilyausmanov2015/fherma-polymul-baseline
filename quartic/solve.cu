@@ -2,7 +2,7 @@
 #define FHERMA_SHARED_SWIZZLE 1
 #endif
 #ifndef FHERMA_RNS_RADIX8
-#define FHERMA_RNS_RADIX8 0
+#define FHERMA_RNS_RADIX8 1
 #endif
 #ifndef FHERMA_MAPPED_OUTPUT
 #define FHERMA_MAPPED_OUTPUT 0
@@ -186,7 +186,7 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
     #pragma unroll
     for(unsigned k=0;k<8;++k) tile[small_index(t+k*Tile/8)]=values[t+k*Tile/8];
     __syncthreads();
-    for(unsigned half=1;half<=Tile/16;half*=8) {
+    for(unsigned half=1;half*8<=Tile;half*=8) {
         unsigned j=t&(half-1),i=8*(t-j)+j;uint32_t x[8];
         #pragma unroll
         for(unsigned k=0;k<8;++k) x[k]=tile[small_index(i+k*half)];
@@ -204,17 +204,23 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
                 }
             }
         }
-        #pragma unroll
-        for(unsigned k=0;k<8;++k) tile[small_index(i+k*half)]=x[k];
-        __syncthreads();
+        if(half*8==Tile) {
+            #pragma unroll
+            for(unsigned k=0;k<8;++k) values[i+k*half]=x[k];
+        } else {
+            #pragma unroll
+            for(unsigned k=0;k<8;++k) tile[small_index(i+k*half)]=x[k];
+            __syncthreads();
+        }
     }
-    // Ten stages = three radix-8 groups and one radix-2 stage.
-    // The last stage writes global memory directly, with no final barrier.
-    #pragma unroll
-    for(unsigned k=0;k<4;++k) {
-        unsigned j=t+k*Tile/8;
-        uint32_t u=tile[small_index(j)],v=shoup(tile[small_index(j+Tile/2)],tables[2*j],p);
-        values[j]=add_mod(u,v,p);values[j+Tile/2]=sub_mod(u,v,p);
+    // 1024 needs one more binary stage; 4096 has four complete radix-8 groups.
+    if(Tile==1024) {
+        #pragma unroll
+        for(unsigned k=0;k<4;++k) {
+            unsigned j=t+k*Tile/8;
+            uint32_t u=tile[small_index(j)],v=shoup(tile[small_index(j+Tile/2)],tables[2*j],p);
+            values[j]=add_mod(u,v,p);values[j+Tile/2]=sub_mod(u,v,p);
+        }
     }
 #elif FHERMA_RNS_RADIX4
     #pragma unroll
@@ -263,56 +269,55 @@ __global__ void stage_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
     uint32_t u=values[i],v=shoup(values[i+half],tables[prime_i*n+j*stride],p);
     values[i]=add_mod(u,v,p);values[i+half]=sub_mod(u,v,p);
 }
-// [prime][32][1024] -> [prime][1024][32], padded shared transpose.
+// [prime][TailRows][Tile] -> [prime][Tile][TailRows], padded transpose.
 __global__ void transpose_rns(const uint32_t* source,uint32_t* destination,unsigned n) {
     __shared__ uint32_t tile[32*33];
     unsigned x=threadIdx.x&31,y=threadIdx.x>>5,column=blockIdx.x*32;
     source+=blockIdx.y*n;destination+=blockIdx.y*n;
-    for(unsigned dy=0;dy<32;dy+=8) tile[(y+dy)*33+x]=source[(y+dy)*1024+column+x];
+    for(unsigned dy=0;dy<32;dy+=8) if(y+dy<TailRows) tile[(y+dy)*33+x]=source[(y+dy)*Tile+column+x];
     __syncthreads();
-    for(unsigned dy=0;dy<32;dy+=8) destination[(column+y+dy)*32+x]=tile[x*33+y+dy];
+    for(unsigned dy=0;dy<32;dy+=8) if(x<TailRows) destination[(column+y+dy)*TailRows+x]=tile[x*33+y+dy];
 }
 __global__ void tail_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
     __shared__ uint32_t tile[256];
     unsigned t=threadIdx.x,prime_i=blockIdx.y%ModCount;
-    unsigned column=blockIdx.x*8+t/16,k=t%16,offset=(t/16)*32;
+    unsigned column=blockIdx.x*TailColumns+t/(TailRows/2),k=t%(TailRows/2),offset=(t/(TailRows/2))*TailRows;
     values+=blockIdx.y*n+blockIdx.x*256;tables+=prime_i*n;
     uint32_t p=mods[prime_i].p;
     tile[t]=values[t];tile[t+128]=values[t+128];
     __syncthreads();
-    for(unsigned half=1;half<32;half*=2) {
+    for(unsigned half=1;half<TailRows;half*=2) {
         unsigned j=k&(half-1),i=offset+2*(k-j)+j;
-        uint32_t u=tile[i],v=shoup(tile[i+half],tables[1024*(half-1)+column*half+j],p);
+        uint32_t u=tile[i],v=shoup(tile[i+half],tables[Tile*(half-1)+column*half+j],p);
         tile[i]=add_mod(u,v,p);tile[i+half]=sub_mod(u,v,p);
         __syncthreads();
     }
     values[t]=tile[t];values[t+128]=tile[t+128];
 }
-// Read eight adjacent columns directly, then do all five tail stages in
-// shared memory. Each input warp reads four aligned 32-byte segments.
+// Transpose adjacent columns while executing the remaining tail stages.
 __global__ void fused_tail_rns(const uint32_t* source,uint32_t* destination,const SmallMod* mods,
                                const Twiddle* tables,unsigned n) {
-    __shared__ uint32_t tile[8*33];
-    unsigned t=threadIdx.x,prime_i=blockIdx.y%ModCount,column_base=blockIdx.x*8;
+    __shared__ uint32_t tile[TailColumns*(TailRows+1)];
+    unsigned t=threadIdx.x,prime_i=blockIdx.y%ModCount,column_base=blockIdx.x*TailColumns;
     source+=blockIdx.y*n;destination+=blockIdx.y*n+blockIdx.x*256;tables+=prime_i*n;
     #pragma unroll
     for(unsigned index=t;index<256;index+=128) {
-        unsigned row=index/8,column=index%8;
-        tile[column*33+row]=source[row*1024+column_base+column];
+        unsigned row=index/TailColumns,column=index%TailColumns;
+        tile[column*(TailRows+1)+row]=source[row*Tile+column_base+column];
     }
     __syncthreads();
-    unsigned column=column_base+t/16,k=t%16,offset=(t/16)*33;
+    unsigned column=column_base+t/(TailRows/2),k=t%(TailRows/2),offset=(t/(TailRows/2))*(TailRows+1);
     uint32_t p=mods[prime_i].p;
-    for(unsigned half=1;half<32;half*=2) {
+    for(unsigned half=1;half<TailRows;half*=2) {
         unsigned j=k&(half-1),i=offset+2*(k-j)+j;
-        uint32_t u=tile[i],v=shoup(tile[i+half],tables[1024*(half-1)+column*half+j],p);
+        uint32_t u=tile[i],v=shoup(tile[i+half],tables[Tile*(half-1)+column*half+j],p);
         tile[i]=add_mod(u,v,p);tile[i+half]=sub_mod(u,v,p);
         __syncthreads();
     }
     destination[2*t]=tile[offset+2*k];destination[2*t+1]=tile[offset+2*k+1];
 }
 __device__ unsigned natural_index(unsigned i,unsigned n) {
-    return FHERMA_RNS_TAIL && n==32768 ? ((i&31)*1024+(i>>5)) : i;
+    return FHERMA_RNS_TAIL && n==32768 ? ((i&(TailRows-1))*Tile+i/TailRows) : i;
 }
 __global__ void product_rns(const uint32_t* ab,uint32_t* c,const SmallMod* mods,unsigned n,unsigned logn) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
@@ -493,7 +498,7 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     }
     uint32_t* forward_values=prepared;
     if(FHERMA_RNS_TAIL && s.n==32768) {
-        dim3 transposes(32,2*PrimeCount),tails(128,2*PrimeCount);
+        dim3 transposes(Tile/32,2*PrimeCount),tails(128,2*PrimeCount);
         uint32_t* transposed=s.overlap_input ? s.ab : s.scratch;
         if(FHERMA_RNS_FUSED_TRANSPOSE) {
             fused_tail_rns<<<tails,128,0,stream>>>(prepared,transposed,s.mods,s.tail_forward,s.n);
@@ -514,7 +519,7 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     }
     uint32_t* inverse_values=s.c;
     if(FHERMA_RNS_TAIL && s.n==32768) {
-        dim3 transposes(32,PrimeCount),tails(128,PrimeCount);
+        dim3 transposes(Tile/32,PrimeCount),tails(128,PrimeCount);
         if(FHERMA_RNS_FUSED_TRANSPOSE) {
             fused_tail_rns<<<tails,128,0,stream>>>(s.c,s.ab,s.mods,s.tail_inverse,s.n);
         } else {
@@ -573,18 +578,18 @@ void* fherma_init(const fherma::Point& p) {
         auto original=constants.scale;
         for(unsigned pi=0;pi<ScaleCount;++pi)
             for(unsigned i=0;i<p.N;++i)
-                constants.scale[pi*p.N+i]=original[pi*p.N+(i&31)*1024+(i>>5)];
+                constants.scale[pi*p.N+i]=original[pi*p.N+(i&(TailRows-1))*Tile+i/TailRows];
     }
     upload(s->forward,constants.forward);upload(s->inverse,constants.inverse);upload(s->scale,constants.scale);
     upload(s->small_forward,constants.small_forward);upload(s->small_inverse,constants.small_inverse);
     if(FHERMA_RNS_TAIL && p.N==32768) {
         std::vector<quartic::Twiddle> forward_tail(size_t(quartic::ModCount)*p.N),inverse_tail(forward_tail.size());
         for(unsigned pi=0;pi<quartic::ModCount;++pi)
-            for(unsigned half=1;half<32;half*=2)
-                for(unsigned col=0;col<1024;++col)
+            for(unsigned half=1;half<TailRows;half*=2)
+                for(unsigned col=0;col<Tile;++col)
                     for(unsigned j=0;j<half;++j) {
-                        unsigned index=pi*p.N+1024*(half-1)+col*half+j;
-                        unsigned source=pi*p.N+(col+1024*j)*(32/half);
+                        unsigned index=pi*p.N+Tile*(half-1)+col*half+j;
+                        unsigned source=pi*p.N+(col+Tile*j)*(TailRows/half);
                         forward_tail[index]=constants.forward[source];inverse_tail[index]=constants.inverse[source];
                     }
         upload(s->tail_forward,forward_tail);upload(s->tail_inverse,inverse_tail);
