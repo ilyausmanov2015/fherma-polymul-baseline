@@ -1,3 +1,6 @@
+#ifndef FHERMA_SHARED_SWIZZLE
+#define FHERMA_SHARED_SWIZZLE 1
+#endif
 #ifndef FHERMA_RNS_RADIX8
 #define FHERMA_RNS_RADIX8 1
 #endif
@@ -163,6 +166,16 @@ __global__ void reverse_rns(const uint32_t* source,uint32_t* destination,unsigne
 // Four warps reuse 32 complete coefficients. Padding to 29 words avoids
 // shared-memory bank conflicts when a warp reads the same limb of 32 inputs.
 
+__device__ inline unsigned small_index(unsigned x) {
+#if FHERMA_SHARED_SWIZZLE && FHERMA_RNS_RADIX8
+    unsigned high=(x>>5)&7;
+    return x^high^((high&6)<<2);
+#elif FHERMA_SHARED_SWIZZLE && FHERMA_RNS_RADIX4
+    return x^(((x>>5)&3)*5)^((x>>2)&16);
+#else
+    return x;
+#endif
+}
 __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
     __shared__ uint32_t tile[Tile];
     unsigned t=threadIdx.x,prime_i=blockIdx.y%ModCount;
@@ -171,12 +184,12 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
     uint32_t p=mods[prime_i].p;
 #if FHERMA_RNS_RADIX8
     #pragma unroll
-    for(unsigned k=0;k<8;++k) tile[t+k*Tile/8]=values[t+k*Tile/8];
+    for(unsigned k=0;k<8;++k) tile[small_index(t+k*Tile/8)]=values[t+k*Tile/8];
     __syncthreads();
     for(unsigned half=1;half<=Tile/16;half*=8) {
         unsigned j=t&(half-1),i=8*(t-j)+j;uint32_t x[8];
         #pragma unroll
-        for(unsigned k=0;k<8;++k) x[k]=tile[i+k*half];
+        for(unsigned k=0;k<8;++k) x[k]=tile[small_index(i+k*half)];
         #pragma unroll
         for(unsigned step=1;step<8;step*=2) {
             #pragma unroll
@@ -192,7 +205,7 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
             }
         }
         #pragma unroll
-        for(unsigned k=0;k<8;++k) tile[i+k*half]=x[k];
+        for(unsigned k=0;k<8;++k) tile[small_index(i+k*half)]=x[k];
         __syncthreads();
     }
     // Ten stages = three radix-8 groups and one radix-2 stage.
@@ -200,16 +213,16 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
     #pragma unroll
     for(unsigned k=0;k<4;++k) {
         unsigned j=t+k*Tile/8;
-        uint32_t u=tile[j],v=shoup(tile[j+Tile/2],tables[2*j],p);
+        uint32_t u=tile[small_index(j)],v=shoup(tile[small_index(j+Tile/2)],tables[2*j],p);
         values[j]=add_mod(u,v,p);values[j+Tile/2]=sub_mod(u,v,p);
     }
 #elif FHERMA_RNS_RADIX4
     #pragma unroll
-    for(unsigned k=0;k<4;++k) tile[t+k*Tile/4]=values[t+k*Tile/4];
+    for(unsigned k=0;k<4;++k) tile[small_index(t+k*Tile/4)]=values[t+k*Tile/4];
     __syncthreads();
     for(unsigned half=1;half<Tile;half*=4) {
         unsigned j=t&(half-1),i=4*(t-j)+j;
-        uint32_t x0=tile[i],x1=tile[i+half],x2=tile[i+2*half],x3=tile[i+3*half];
+        uint32_t x0=tile[small_index(i)],x1=tile[small_index(i+half)],x2=tile[small_index(i+2*half)],x3=tile[small_index(i+3*half)];
         if(j!=0) {
             Twiddle w=tables[j*(Tile/half)];
             x1=shoup(x1,w,p);x3=shoup(x3,w,p);
@@ -218,23 +231,23 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
         uint32_t a2=add_mod(x2,x3,p),a3=sub_mod(x2,x3,p);
         if(j!=0) a2=shoup(a2,tables[j*(Tile/(2*half))],p);
         a3=shoup(a3,tables[(j+half)*(Tile/(2*half))],p);
-        tile[i]=add_mod(a0,a2,p);tile[i+2*half]=sub_mod(a0,a2,p);
-        tile[i+half]=add_mod(a1,a3,p);tile[i+3*half]=sub_mod(a1,a3,p);
+        tile[small_index(i)]=add_mod(a0,a2,p);tile[small_index(i+2*half)]=sub_mod(a0,a2,p);
+        tile[small_index(i+half)]=add_mod(a1,a3,p);tile[small_index(i+3*half)]=sub_mod(a1,a3,p);
         __syncthreads();
     }
     #pragma unroll
-    for(unsigned k=0;k<4;++k) values[t+k*Tile/4]=tile[t+k*Tile/4];
+    for(unsigned k=0;k<4;++k) values[t+k*Tile/4]=tile[small_index(t+k*Tile/4)];
 #else
-    tile[t]=values[t];tile[t+Tile/2]=values[t+Tile/2];
+    tile[small_index(t)]=values[t];tile[small_index(t+Tile/2)]=values[t+Tile/2];
     __syncthreads();
     unsigned stride=Tile;
     for(unsigned half=1;half<Tile;half*=2,stride>>=1) {
         unsigned j=t&(half-1),i=2*(t-j)+j;
-        uint32_t u=tile[i],v=shoup(tile[i+half],tables[j*stride],p);
-        tile[i]=add_mod(u,v,p);tile[i+half]=sub_mod(u,v,p);
+        uint32_t u=tile[small_index(i)],v=shoup(tile[small_index(i+half)],tables[j*stride],p);
+        tile[small_index(i)]=add_mod(u,v,p);tile[small_index(i+half)]=sub_mod(u,v,p);
         __syncthreads();
     }
-    values[t]=tile[t];values[t+Tile/2]=tile[t+Tile/2];
+    values[t]=tile[small_index(t)];values[t+Tile/2]=tile[small_index(t+Tile/2)];
 #endif
 }
 __global__ void stage_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,
