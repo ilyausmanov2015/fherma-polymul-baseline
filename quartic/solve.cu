@@ -44,13 +44,13 @@
 #define FHERMA_CRT_PIPELINE 0
 #endif
 #ifndef FHERMA_PREPARE_PRIMES
-#define FHERMA_PREPARE_PRIMES 4
+#define FHERMA_PREPARE_PRIMES 16
 #endif
 #ifndef FHERMA_HARVEY_BITS
 #define FHERMA_HARVEY_BITS 3
 #endif
 #ifndef FHERMA_HARVEY
-#define FHERMA_HARVEY 0
+#define FHERMA_HARVEY 1
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
 #define FHERMA_OUTPUT_GRAPH 0
@@ -77,7 +77,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 0
+#define FHERMA_HOST_PROFILE 1
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -110,7 +110,7 @@
 #define FHERMA_MAPPED_OUTPUT 0
 #endif
 #ifndef FHERMA_MAPPED_INPUT
-#define FHERMA_MAPPED_INPUT 0
+#define FHERMA_MAPPED_INPUT 1
 #endif
 #ifndef FHERMA_QUARTIC_COMPACT_SCALE
 #define FHERMA_QUARTIC_COMPACT_SCALE 0
@@ -125,7 +125,7 @@
 #define FHERMA_RNS_TILED_PREPARE 1
 #endif
 #ifndef FHERMA_INPUT_WC
-#define FHERMA_INPUT_WC 0
+#define FHERMA_INPUT_WC 1
 #endif
 #ifndef FHERMA_STREAM_OUTPUT
 #define FHERMA_STREAM_OUTPUT 0
@@ -1233,9 +1233,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     std::optional<HostOutputAllocator::Work> allocation_task;
     auto prepare_output=[&] {
 #if FHERMA_ASYNC_OUTPUT_PREFAULT
-    // Allocate and fault pages with the pool before it starts packing input.
-    // The dedicated worker then only initializes this fresh vector's elements,
-    // concurrently with CPU packing and GPU submission, inside this run.
+    // Allocate and fault pages while the pool is idle. The dedicated worker
+    // then initializes this fresh vector concurrently with either input packing
+    // or GPU submission, depending on the selected start point inside this run.
     output.c.data.reserve(words);
     s.copy.prefault(output.c.data.data(),bytes);
 #endif
