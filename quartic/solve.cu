@@ -287,6 +287,9 @@ template<bool Product> __global__ void small_rns(uint32_t* values,const SmallMod
 }
 // DIF forward accepts natural-order input and leaves bit-reversed frequencies.
 // The inverse DIT consumes this order directly, including the pointwise product.
+__device__ inline unsigned small_dif_index(unsigned x) {
+    return x^(((x>>5)&7)<<1)^((x>>5)&1)^((x>>3)&16);
+}
 __global__ void small_dif_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
     static_assert(!FHERMA_DIF_FORWARD || (Tile==1024 && FHERMA_RNS_TAIL),"DIF requires 1024-element tiles and the tail path");
     __shared__ uint32_t tile[Tile];
@@ -294,12 +297,12 @@ __global__ void small_dif_rns(uint32_t* values,const SmallMod* mods,const Twiddl
     values+=blockIdx.y*n+blockIdx.x*Tile;tables+=pi*Tile;
     uint32_t p=mods[pi].p;
     #pragma unroll
-    for(unsigned k=0;k<8;++k) tile[small_index(t+k*Tile/8)]=values[t+k*Tile/8];
+    for(unsigned k=0;k<8;++k) tile[small_dif_index(t+k*Tile/8)]=values[t+k*Tile/8];
     __syncthreads();
     for(unsigned half=Tile/8;half;half/=8) {
         unsigned j=t&(half-1),i=8*(t-j)+j;uint32_t x[8];
         #pragma unroll
-        for(unsigned k=0;k<8;++k) x[k]=tile[small_index(i+k*half)];
+        for(unsigned k=0;k<8;++k) x[k]=tile[small_dif_index(i+k*half)];
         #pragma unroll
         for(unsigned step=4;step;step/=2) {
             #pragma unroll
@@ -315,13 +318,13 @@ __global__ void small_dif_rns(uint32_t* values,const SmallMod* mods,const Twiddl
             }
         }
         #pragma unroll
-        for(unsigned k=0;k<8;++k) tile[small_index(i+k*half)]=x[k];
+        for(unsigned k=0;k<8;++k) tile[small_dif_index(i+k*half)]=x[k];
         __syncthreads();
     }
     #pragma unroll
     for(unsigned k=0;k<4;++k) {
         unsigned i=2*(t+k*Tile/8);
-        uint32_t u=tile[small_index(i)],v=tile[small_index(i+1)];
+        uint32_t u=tile[small_dif_index(i)],v=tile[small_dif_index(i+1)];
         values[i]=add_mod(u,v,p);values[i+1]=sub_mod(u,v,p);
     }
 }

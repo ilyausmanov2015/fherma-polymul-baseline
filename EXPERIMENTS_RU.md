@@ -260,3 +260,21 @@ max 475,486, среднее 454,591 мкс. 5,58× к исходному baselin
 Описание и доказательство: research/QUARTIC_RNS_RU.md; модель банков —
 research/shared_banks.py. Все экспериментальные передачи данных отражены
 в research/TRANSFER_GRAPHS_RU.md и results/experiments.json.
+
+## Warp shuffle и CPU acknowledgments: 17 сентября 18:26 МСК
+
+9d717d4: 20/20 (+2/2 прогрев), медиана 421,164 мкс, min 402,310,
+max 430,625, среднее 419,253 мкс. Ускорение 6,01× к baseline.
+Произведение вычисляется при загрузке первого блока обратного NTT.
+В хвосте NTT после shared transpose обмен выполняется через warp shuffle;
+осталась одна синхронизация блока. CPU-потоки публикуют завершение в своих
+cache-line-aligned atomic slots вместо общего contended fetch_sub.
+Acquire всех acknowledgments предшествует перезаписи общей задачи.
+
+Короткие прогоны (все 3/3): fused product e72a0ee — 452,496 мкс;
+добавление warp-tail 98b6f3e — 435,646; CPU acknowledgments 9d717d4 —
+423,526. Последний результат подтверждён полным конкурсным запуском.
+CPU shuffle adapter проверяет два последовательных обмена на 1152 lanes;
+сам kernel прошёл независимую точную проверку N32768. Host pool —
+1050/1050, input pipeline — 36/36. CUDA CI: fused tail 26 регистров,
+CRT 61, prepare 56, spill отсутствует.
