@@ -4,11 +4,15 @@
 #include <cupqc/bigint.hpp>
 #include <cuda_runtime.h>
 #include <memory>
+#include <cstdio>
 #ifndef FHERMA_MONTGOMERY
 #define FHERMA_MONTGOMERY 0
 #endif
 #ifndef FHERMA_SOA
 #define FHERMA_SOA 1
+#endif
+#ifndef FHERMA_PROFILE
+#define FHERMA_PROFILE 1
 #endif
 
 namespace {
@@ -77,9 +81,21 @@ struct State {
     uint32_t n=0, logn=0;
     uint32_t *q=nullptr,*roots=nullptr,*twist=nullptr,*inv_twist=nullptr,*scale=nullptr;
     uint32_t *input=nullptr,*ab=nullptr,*c=nullptr;
+#if FHERMA_PROFILE
+    cudaEvent_t events[8]{};
+#endif
     ~State() { cudaFree(q); cudaFree(roots); cudaFree(twist); cudaFree(inv_twist);
-        cudaFree(scale); cudaFree(input); cudaFree(ab); cudaFree(c); }
+        cudaFree(scale); cudaFree(input); cudaFree(ab); cudaFree(c);
+#if FHERMA_PROFILE
+        for(auto e:events) if(e) cudaEventDestroy(e);
+#endif
+    }
 };
+void mark(State& s,unsigned i) {
+#if FHERMA_PROFILE
+    check(cudaEventRecord(s.events[i]),"profile record");
+#endif
+}
 __device__ Big pow_small(Big x,unsigned e,const Mod& q) {
     Big y=encode(Big(uint32_t(1)),q);
     while(e) { if(e&1) y=multiply(y,x,q); e>>=1; if(e) x=multiply(x,x,q); }
@@ -153,22 +169,43 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaMemcpy(s->roots,packed.data(),3*L*4,cudaMemcpyHostToDevice),"copy roots");
     make_tables<<<(p.N+127)/128,128>>>(s->q,s->roots,s->twist,s->inv_twist,s->scale,p.N);
     check(cudaGetLastError(),"table launch"); check(cudaDeviceSynchronize(),"table setup");
+#if FHERMA_PROFILE
+    for(auto& e:s->events) check(cudaEventCreate(&e),"profile create");
+#endif
     return s.release();
 }
 fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     auto& s=*static_cast<State*>(opaque); size_t words=size_t(s.n)*L, bytes=words*4;
     if(in.a.data.size()!=words || in.b.data.size()!=words) throw std::runtime_error("input size");
+    mark(s,0);
     check(cudaMemcpy(s.input,in.a.data.data(),bytes,cudaMemcpyHostToDevice),"copy a");
     check(cudaMemcpy(s.input+words,in.b.data.data(),bytes,cudaMemcpyHostToDevice),"copy b");
+    mark(s,1);
     dim3 full((s.n+127)/128,2), halves((s.n/2+127)/128,2);
     prepare<<<full,128>>>(s.input,s.ab,s.twist,s.q,s.n,s.logn);
+    mark(s,2);
     for(unsigned half=1;half<s.n;half*=2) stage<<<halves,128>>>(s.ab,s.twist,s.q,s.n,half);
+    mark(s,3);
     product<<<full.x,128>>>(s.ab,s.c,s.q,s.n,s.logn);
+    mark(s,4);
     for(unsigned half=1;half<s.n;half*=2) stage<<<halves.x,128>>>(s.c,s.inv_twist,s.q,s.n,half);
+    mark(s,5);
     finish<<<full.x,128>>>(s.c,s.input,s.scale,s.q,s.n);
+    mark(s,6);
     check(cudaGetLastError(),"NTT launch");
     fherma::Outputs out; out.c.shape={s.n,L}; out.c.data.resize(words);
     check(cudaMemcpy(out.c.data.data(),s.input,bytes,cudaMemcpyDeviceToHost),"copy output / synchronize");
+    mark(s,7);
+#if FHERMA_PROFILE
+    check(cudaEventSynchronize(s.events[7]),"profile synchronize");
+    const char* names[]={"h2d","prepare","forward","product","inverse","finish","d2h"};
+    std::fprintf(stderr,"PROFILE_US");
+    for(unsigned i=0;i<7;++i) {
+        float ms=0; check(cudaEventElapsedTime(&ms,s.events[i],s.events[i+1]),"profile elapsed");
+        std::fprintf(stderr," %s=%.3f",names[i],ms*1000);
+    }
+    std::fprintf(stderr,"\n");
+#endif
     return out;
 }
 void fherma_free(void* state) { delete static_cast<State*>(state); }
