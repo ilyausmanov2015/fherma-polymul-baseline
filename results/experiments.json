@@ -4893,5 +4893,133 @@
     "host_graph_us": [],
     "host_alloc_us": [],
     "host_staged_us": []
+  },
+  {
+    "id": "6aac0c24e3bdd1a5530e0e4c",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.360470906,
+    "started_at": "2026-09-17T15:49:56.862Z",
+    "finished_at": "2026-09-17T15:51:32.277Z",
+    "commit": "ff6f022f02b765767a35c159e61602ec42edb983",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.000401704,
+          "median": 0.000406031,
+          "mean": 0.000407498,
+          "max": 0.000414759
+        }
+      }
+    ],
+    "case_errors": [],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": []
+  },
+  {
+    "id": "6aac0c9ce3bdd1a5530e1c6d",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.320673227,
+    "started_at": "2026-09-17T15:51:57.626Z",
+    "finished_at": "2026-09-17T15:53:32.350Z",
+    "commit": "1f780573a100ffaceca38c2ca84c84b6c09609bd",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.000386526,
+          "median": 0.000393949,
+          "mean": 0.000398786,
+          "max": 0.000415883
+        }
+      }
+    ],
+    "case_errors": [],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": []
+  },
+  {
+    "id": "6aac0d14e3bdd1a5530e28f6",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.363515197,
+    "started_at": "2026-09-17T15:53:57.902Z",
+    "finished_at": "2026-09-17T15:55:30.923Z",
+    "commit": "955022bc45696307a75bb7408efdbc84df19d026",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.000540213,
+          "median": 0.000543163,
+          "mean": 0.000550665,
+          "max": 0.000568619
+        }
+      }
+    ],
+    "case_errors": [],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": []
+  },
+  {
+    "id": "6aac0d8ce3bdd1a5530e35b5",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.312958039,
+    "started_at": "2026-09-17T15:55:59.306Z",
+    "finished_at": "2026-09-17T15:57:34.290Z",
+    "commit": "5973e6eb960a2fb75adee2e44e1e51912abf9650",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.000393407,
+          "median": 0.000409033,
+          "mean": 0.000404627,
+          "max": 0.000411441
+        }
+      }
+    ],
+    "case_errors": [],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": []
   }
 ]
