@@ -1,3 +1,6 @@
+#ifndef FHERMA_FUSED_TAIL
+#define FHERMA_FUSED_TAIL 1
+#endif
 #ifndef FHERMA_MIN_BLOCKS
 #define FHERMA_MIN_BLOCKS 0
 #endif
@@ -283,19 +286,62 @@ void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsi
     store_coeff(load_coeff(tile,2*t,256),values,base+2*t,n);
     store_coeff(load_coeff(tile,2*t+1,256),values,base+2*t+1,n);
 }
+// Transpose each limb plane: [128 rows][256 columns] -> [256][128].
+// Each warp performs contiguous reads and writes; padding avoids bank conflicts.
+__global__ void transpose_tail(const uint32_t* source,uint32_t* dest,unsigned n) {
+    __shared__ uint32_t tile[32*33];
+    unsigned plane=blockIdx.x/32, block=blockIdx.x%32;
+    unsigned row=block/8*32, column=block%8*32;
+    unsigned x=threadIdx.x%32,y=threadIdx.x/32;
+    source+=(blockIdx.y*L+plane)*n;
+    dest+=(blockIdx.y*L+plane)*n;
+    for(unsigned dy=0;dy<32;dy+=8)
+        tile[(y+dy)*33+x]=source[(row+y+dy)*256+column+x];
+    __syncthreads();
+    for(unsigned dy=0;dy<32;dy+=8)
+        dest[(column+y+dy)*128+row+x]=tile[x*33+y+dy];
+}
+// The seven remaining stages are independent for each low eight-bit column.
+// After the transpose, two entire columns fit one shared-memory tile.
+__global__ void tail_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsigned n) {
+    __shared__ uint32_t tile[256*L];
+    unsigned t=threadIdx.x, base=blockIdx.x*256;
+    unsigned column=2*blockIdx.x+t/64, k=t%64, offset=(t/64)*128;
+    values+=blockIdx.y*n*L;
+    const Mod q=load_modulus(qp);
+    store_coeff(load_coeff(values,base+2*t,n),tile,2*t,256);
+    store_coeff(load_coeff(values,base+2*t+1,n),tile,2*t+1,256);
+    __syncthreads();
+    for(unsigned half=1;half<128;half*=2) {
+        unsigned j=k&(half-1), i=offset+2*(k-j)+j;
+        unsigned exponent=(column+256*j)*(n/(half*256));
+        const Big u=load_coeff(tile,i,256),v=load_coeff(tile,i+half,256);
+        const Big tw=load_coeff(table,exponent,n);
+        const Big m=(FHERMA_SKIP_IDENTITY && exponent==0) ? v : multiply(v,tw,q);
+        store_coeff(u.add_mod(m,q),tile,i,256);
+        store_coeff(u.sub_mod(m,q),tile,i+half,256);
+        __syncthreads();
+    }
+    store_coeff(load_coeff(tile,2*t,256),values,base+2*t,n);
+    store_coeff(load_coeff(tile,2*t+1,256),values,base+2*t+1,n);
+}
+__device__ unsigned frequency_index(unsigned i,unsigned n) {
+    return (FHERMA_FUSED_TAIL && n==32768) ? ((i&255)*128+(i>>8)) : i;
+}
 __global__ void product(const uint32_t* ab,uint32_t* c,const uint32_t* qp,
                         unsigned n,unsigned logn) {
     unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
     const Mod q=load_modulus(qp);
-    const Big a=load_coeff(ab,i,n), b=load_coeff(ab+n*L,i,n);
+    unsigned source_i=frequency_index(i,n);
+    const Big a=load_coeff(ab,source_i,n), b=load_coeff(ab+n*L,source_i,n);
     store_coeff(multiply(a,b,q),c,__brev(i)>>(32-logn),n);
 }
 __global__ void finish(const uint32_t* c,uint32_t* out,const uint32_t* scale,const uint32_t* qp,unsigned n) {
     unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=n) return;
     const Mod q=load_modulus(qp);
-    const Big x=load_coeff(c,i,n), s=load_coeff(scale,i,n);
+    const Big x=load_coeff(c,frequency_index(i,n),n), s=load_coeff(scale,i,n);
     decode(multiply(x,s,q),q).store(out,i);
 }
 void launch_ntt(State& s,cudaStream_t stream=nullptr) {
@@ -308,26 +354,49 @@ void launch_ntt(State& s,cudaStream_t stream=nullptr) {
         small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.ab,s.twist,s.q,s.n);
         first=256;
     }
-    for(unsigned half=first;half<s.n;half*=2) stage<<<halves,128,0,stream>>>(s.ab,s.twist,s.q,s.n,half);
+    uint32_t* forward_values=s.ab;
+    if(FHERMA_FUSED_TAIL && s.n==32768) {
+        dim3 planes(32*L,2),tiles(128,2);
+        transpose_tail<<<planes,256,0,stream>>>(s.ab,s.input,s.n);
+        tail_stages<<<tiles,128,0,stream>>>(s.input,s.twist,s.q,s.n);
+        forward_values=s.input;
+    } else {
+        for(unsigned half=first;half<s.n;half*=2) stage<<<halves,128,0,stream>>>(s.ab,s.twist,s.q,s.n,half);
+    }
     mark(s,3);
-    product<<<full.x,128,0,stream>>>(s.ab,s.c,s.q,s.n,s.logn);
+    product<<<full.x,128,0,stream>>>(forward_values,s.c,s.q,s.n,s.logn);
     mark(s,4);
     if(FHERMA_FUSED_SMALL && s.n>=256) {
         unsigned tiles=s.n/256;
         small_stages<<<tiles,128*FHERMA_TPI,0,stream>>>(s.c,s.inv_twist,s.q,s.n);
     }
-    for(unsigned half=first;half<s.n;half*=2) stage<<<halves.x,128,0,stream>>>(s.c,s.inv_twist,s.q,s.n,half);
+    uint32_t* inverse_values=s.c;
+    if(FHERMA_FUSED_TAIL && s.n==32768) {
+        transpose_tail<<<32*L,256,0,stream>>>(s.c,s.ab,s.n);
+        tail_stages<<<128,128,0,stream>>>(s.ab,s.inv_twist,s.q,s.n);
+        inverse_values=s.ab;
+    } else {
+        for(unsigned half=first;half<s.n;half*=2) stage<<<halves.x,128,0,stream>>>(s.c,s.inv_twist,s.q,s.n,half);
+    }
     mark(s,5);
-    finish<<<full.x,128,0,stream>>>(s.c,s.input,s.scale,s.q,s.n);
+    finish<<<full.x,128,0,stream>>>(inverse_values,s.input,s.scale,s.q,s.n);
     mark(s,6);
     check(cudaGetLastError(),"NTT launch");
 }
 } // namespace
 
 void* fherma_init(const fherma::Point& p) {
+    static_assert(!FHERMA_FUSED_TAIL || (FHERMA_SOA && FHERMA_TPI==1 && FHERMA_FUSED_SMALL),"tail fusion uses single-thread SoA and eight initial stages");
     if(p.N<2 || (p.N&(p.N-1)) || p.N>32768 || p.W!=868 || p.L!=L || p.q.data.size()!=L)
         throw std::runtime_error("coverage: power-of-two 2<=N<=32768, W=868, L=28");
     if(FHERMA_NUMA) pin_near_gpu();
+#ifdef __CUDACC__
+    int pageable=0,host_tables=0,managed=0;
+    cudaDeviceGetAttribute(&pageable,cudaDevAttrPageableMemoryAccess,0);
+    cudaDeviceGetAttribute(&host_tables,cudaDevAttrPageableMemoryAccessUsesHostPageTables,0);
+    cudaDeviceGetAttribute(&managed,cudaDevAttrConcurrentManagedAccess,0);
+    std::fprintf(stderr,"MEMORY_CAPS pageable=%d host_tables=%d concurrent_managed=%d\n",pageable,host_tables,managed);
+#endif
 #if !FHERMA_MONTGOMERY
     uint32_t delta=uint32_t(0)-p.q.data[0];
     bool special=delta>0 && delta<0x10000000u && p.q.data[27]==15u;
