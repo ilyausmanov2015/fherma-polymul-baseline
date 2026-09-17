@@ -1,5 +1,8 @@
+#ifndef FHERMA_RNS_RADIX8
+#define FHERMA_RNS_RADIX8 1
+#endif
 #ifndef FHERMA_MAPPED_OUTPUT
-#define FHERMA_MAPPED_OUTPUT 1
+#define FHERMA_MAPPED_OUTPUT 0
 #endif
 #ifndef FHERMA_MAPPED_INPUT
 #define FHERMA_MAPPED_INPUT 0
@@ -29,7 +32,7 @@
 #define FHERMA_PIPELINE_INPUT 4
 #endif
 #ifndef FHERMA_PIPELINE_OUTPUT
-#define FHERMA_PIPELINE_OUTPUT 1
+#define FHERMA_PIPELINE_OUTPUT 4
 #endif
 #ifndef FHERMA_RNS_RADIX4
 #define FHERMA_RNS_RADIX4 1
@@ -166,7 +169,41 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
     values+=blockIdx.y*n+blockIdx.x*Tile;
     tables+=prime_i*Tile;
     uint32_t p=mods[prime_i].p;
-#if FHERMA_RNS_RADIX4
+#if FHERMA_RNS_RADIX8
+    #pragma unroll
+    for(unsigned k=0;k<8;++k) tile[t+k*Tile/8]=values[t+k*Tile/8];
+    __syncthreads();
+    for(unsigned half=1;half<=Tile/16;half*=8) {
+        unsigned j=t&(half-1),i=8*(t-j)+j;uint32_t x[8];
+        #pragma unroll
+        for(unsigned k=0;k<8;++k) x[k]=tile[i+k*half];
+        #pragma unroll
+        for(unsigned step=1;step<8;step*=2) {
+            #pragma unroll
+            for(unsigned lane=0;lane<step;++lane) {
+                unsigned exponent=(j+lane*half)*(Tile/(step*half));
+                Twiddle w=tables[exponent];
+                #pragma unroll
+                for(unsigned k=lane;k<8;k+=2*step) {
+                    uint32_t u=x[k],v=x[k+step];
+                    if(exponent) v=shoup(v,w,p);
+                    x[k]=add_mod(u,v,p);x[k+step]=sub_mod(u,v,p);
+                }
+            }
+        }
+        #pragma unroll
+        for(unsigned k=0;k<8;++k) tile[i+k*half]=x[k];
+        __syncthreads();
+    }
+    // Ten stages = three radix-8 groups and one radix-2 stage.
+    // The last stage writes global memory directly, with no final barrier.
+    #pragma unroll
+    for(unsigned k=0;k<4;++k) {
+        unsigned j=t+k*Tile/8;
+        uint32_t u=tile[j],v=shoup(tile[j+Tile/2],tables[2*j],p);
+        values[j]=add_mod(u,v,p);values[j+Tile/2]=sub_mod(u,v,p);
+    }
+#elif FHERMA_RNS_RADIX4
     #pragma unroll
     for(unsigned k=0;k<4;++k) tile[t+k*Tile/4]=values[t+k*Tile/4];
     __syncthreads();
@@ -435,7 +472,7 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     unsigned first=1;
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,2*PrimeCount);
-        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX4?4:2),0,stream>>>(prepared,s.mods,s.small_forward,s.n);
+        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(prepared,s.mods,s.small_forward,s.n);
         first=Tile;
     }
     uint32_t* forward_values=prepared;
@@ -457,7 +494,7 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     mark(s,4,stream);
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,PrimeCount);
-        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX4?4:2),0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
+        small_rns<<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
     }
     uint32_t* inverse_values=s.c;
     if(FHERMA_RNS_TAIL && s.n==32768) {
