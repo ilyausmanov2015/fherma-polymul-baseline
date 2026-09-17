@@ -231,12 +231,15 @@ __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* t
         uint32_t a2=add_mod(x2,x3,p),a3=sub_mod(x2,x3,p);
         if(j!=0) a2=shoup(a2,tables[j*(Tile/(2*half))],p);
         a3=shoup(a3,tables[(j+half)*(Tile/(2*half))],p);
-        tile[small_index(i)]=add_mod(a0,a2,p);tile[small_index(i+2*half)]=sub_mod(a0,a2,p);
-        tile[small_index(i+half)]=add_mod(a1,a3,p);tile[small_index(i+3*half)]=sub_mod(a1,a3,p);
-        __syncthreads();
+        if(half==Tile/4) {
+            values[i]=add_mod(a0,a2,p);values[i+2*half]=sub_mod(a0,a2,p);
+            values[i+half]=add_mod(a1,a3,p);values[i+3*half]=sub_mod(a1,a3,p);
+        } else {
+            tile[small_index(i)]=add_mod(a0,a2,p);tile[small_index(i+2*half)]=sub_mod(a0,a2,p);
+            tile[small_index(i+half)]=add_mod(a1,a3,p);tile[small_index(i+3*half)]=sub_mod(a1,a3,p);
+            __syncthreads();
+        }
     }
-    #pragma unroll
-    for(unsigned k=0;k<4;++k) values[t+k*Tile/4]=tile[small_index(t+k*Tile/4)];
 #else
     tile[small_index(t)]=values[t];tile[small_index(t+Tile/2)]=values[t+Tile/2];
     __syncthreads();
