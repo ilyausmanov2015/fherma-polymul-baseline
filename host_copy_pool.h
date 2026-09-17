@@ -45,17 +45,22 @@
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
 #endif
+#ifndef FHERMA_INPUT_WORKERS_ONLY
+#define FHERMA_INPUT_WORKERS_ONLY 0
+#endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
     static constexpr unsigned Threads=FHERMA_COPY_THREADS;
     static constexpr unsigned OutputThreads=FHERMA_OUTPUT_THREADS;
+    static constexpr unsigned Workers=FHERMA_INPUT_WORKERS_ONLY ? Threads : Threads-1;
+    static_assert(!FHERMA_INPUT_WORKERS_ONLY || Threads<24,"leave an allowed CPU for the caller");
     static_assert(Threads>=2 && Threads%2==0,"even copy thread count required");
     static_assert(OutputThreads>=1 && OutputThreads<=Threads,"output workers must fit the pool");
     struct Job { const char *a=nullptr,*b=nullptr; char* out=nullptr; size_t bytes=0; bool prefault=false; } job_;
     std::mutex mutex_;
     std::condition_variable start_,done_;
-    std::array<std::thread,Threads-1> workers_;
+    std::array<std::thread,Workers> workers_;
     unsigned generation_=0,pending_=0;
     bool stop_=false;
     bool in_flight_=false;
@@ -66,7 +71,7 @@ class HostCopyPool {
     alignas(64) std::atomic<unsigned> spin_generation_{0};
     alignas(64) std::atomic<unsigned> spin_pending_{0};
     struct alignas(64) Completion { std::atomic<unsigned> generation{0}; };
-    std::array<Completion,Threads-1> completed_;
+    std::array<Completion,Workers> completed_;
     alignas(64) std::atomic<bool> spin_stop_{false};
     static void pause() {
 #if defined(__x86_64__)
@@ -118,7 +123,7 @@ class HostCopyPool {
             unsigned generation=spin_generation_.load(std::memory_order_acquire);
             if(generation==seen) { pause(); continue; }
             auto job=job_; seen=generation;
-            part(job,rank);
+            if(!FHERMA_INPUT_WORKERS_ONLY || job.b || rank<Threads-1) part(job,rank);
 #if FHERMA_COPY_ACKS
             completed_[rank].generation.store(generation,std::memory_order_release);
 #else
@@ -131,7 +136,9 @@ class HostCopyPool {
             start_.wait(lock,[&] { return stop_ || generation_!=seen; });
             if(stop_) return;
             auto job=job_; seen=generation_;
-            lock.unlock(); part(job,rank); lock.lock();
+            lock.unlock();
+            if(!FHERMA_INPUT_WORKERS_ONLY || job.b || rank<Threads-1) part(job,rank);
+            lock.lock();
             if(--pending_==0) done_.notify_one();
         }
 #endif
@@ -147,19 +154,19 @@ class HostCopyPool {
     }
     void begin(Job job,bool defer_caller=false) {
         assert(!in_flight_);in_flight_=true;
-        deferred_caller_=defer_caller;
+        deferred_caller_=defer_caller && !(FHERMA_INPUT_WORKERS_ONLY && job.b);
 #if FHERMA_SPIN_COPY
         job_=job;
 #if FHERMA_COPY_ACKS
         active_generation_=spin_generation_.fetch_add(1,std::memory_order_release)+1;
 #else
-        spin_pending_.store(Threads-1,std::memory_order_relaxed);
+        spin_pending_.store(Workers,std::memory_order_relaxed);
         spin_generation_.fetch_add(1,std::memory_order_release);
 #endif
-        if(!deferred_caller_) part(job,Threads-1);
+        if(!deferred_caller_ && !(FHERMA_INPUT_WORKERS_ONLY && job.b)) part(job,Threads-1);
 #else
-        { std::lock_guard<std::mutex> lock(mutex_); job_=job; pending_=Threads-1; ++generation_; }
-        start_.notify_all();if(!deferred_caller_) part(job,Threads-1);
+        { std::lock_guard<std::mutex> lock(mutex_); job_=job; pending_=Workers; ++generation_; }
+        start_.notify_all();if(!deferred_caller_ && !(FHERMA_INPUT_WORKERS_ONLY && job.b)) part(job,Threads-1);
 #endif
     }
     void finish() {
@@ -181,7 +188,7 @@ class HostCopyPool {
     void run(Job job) { begin(job);finish(); }
 public:
     HostCopyPool() {
-        std::array<int,Threads-1> worker_cpus; worker_cpus.fill(-1);
+        std::array<int,Workers> worker_cpus; worker_cpus.fill(-1);
 #ifdef __linux__
         cpu_set_t allowed; int caller=sched_getcpu();
         if(caller>=0 && sched_getaffinity(0,sizeof(allowed),&allowed)==0) {
@@ -190,7 +197,7 @@ public:
                 if(CPU_ISSET(cpu,&allowed)) { caller=cpu;break; }
 #endif
             unsigned found=0;
-            for(int cpu=0;cpu<CPU_SETSIZE && found<Threads-1;++cpu)
+            for(int cpu=0;cpu<CPU_SETSIZE && found<Workers;++cpu)
                 if(cpu!=caller && CPU_ISSET(cpu,&allowed)) worker_cpus[found++]=cpu;
             caller_cpu_=caller;
 #if !FHERMA_DEFER_MAIN_PIN
@@ -199,10 +206,10 @@ public:
         }
         std::string quota,period;
         std::ifstream("/sys/fs/cgroup/cpu.max")>>quota>>period;
-        std::fprintf(stderr,"COPY_POOL threads=%u main_cpu=%d worker0=%d cpu_max=%s/%s\n",
-                     Threads,caller,worker_cpus[0],quota.c_str(),period.c_str());
+        std::fprintf(stderr,"COPY_POOL threads=%u input_threads=%u main_cpu=%d worker0=%d cpu_max=%s/%s\n",
+                     Workers+1,Threads,caller,worker_cpus[0],quota.c_str(),period.c_str());
 #endif
-        try { for(unsigned i=0;i<Threads-1;++i) workers_[i]=std::thread([this,i,cpu=worker_cpus[i]] {
+        try { for(unsigned i=0;i<Workers;++i) workers_[i]=std::thread([this,i,cpu=worker_cpus[i]] {
 #ifdef __linux__
             if(cpu>=0) { cpu_set_t mask; CPU_ZERO(&mask); CPU_SET(cpu,&mask); sched_setaffinity(0,sizeof(mask),&mask); }
 #endif
