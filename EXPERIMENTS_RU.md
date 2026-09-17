@@ -538,3 +538,23 @@ physical-first affinity. Модель размещения и мотивиров
 
 046fe0a lazy prepare: 27/27 GMP, CUDA CI успешен, GPU ещё не измерен.
 7f98f30 fused + captured output: CUDA CI успешен, GPU ещё не измерен.
+
+## Проверка host-путей, 17 сентября 21:50 МСК
+
+Все варианты ниже корректны: 3/3 плюс два прогрева.
+
+| Вариант | Коммит | Медиана, мкс |
+|---|---|---:|
+| Physical-first 16 CPU | b87da10 | 414,627 |
+| Physical-first 12 CPU | 0032b9e | 421,845 |
+| Physical-first 8 CPU | cbffd08 | 426,309 |
+| Lazy prepare + fused | 046fe0a | 382,390 |
+| Fused + captured output | 7f98f30 | 383,797 |
+| WC output + fenced MOVNTDQA | d54d7cb | 382,647 |
+
+WC output: run 6aac34ece3bdd1a553134432, CUDA CI успешен;
+1300 host-copy cases, 1050 pool jobs, GMP N1024 9/9.
+Ни один вариант не улучшил подтверждённые 378,0135 мкс.
+Параметры WC/profile возвращены в 0 для следующего эксперимента.
+Radix-16 0afe15c отправлен на 20 тестов; отдельно проверяется компактный
+цикл внешних проходов fused ядра (research/FUSED_LOOP_RU.md).

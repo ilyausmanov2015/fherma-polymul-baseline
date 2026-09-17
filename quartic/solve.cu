@@ -1,5 +1,8 @@
+#ifndef FHERMA_FUSED_UNROLL
+#define FHERMA_FUSED_UNROLL 0
+#endif
 #ifndef FHERMA_OUTPUT_WC
-#define FHERMA_OUTPUT_WC 1
+#define FHERMA_OUTPUT_WC 0
 #endif
 #ifndef FHERMA_PHYSICAL_CORES
 #define FHERMA_PHYSICAL_CORES 0
@@ -98,7 +101,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 1
+#define FHERMA_HOST_PROFILE 0
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -607,9 +610,13 @@ template<bool Lazy> __global__ void harvey_convolution_tile(const uint32_t* oper
         a[harvey_index<false>(i)]=left[i];b[harvey_index<false>(i)]=right[i];
     }
     __syncthreads();
+    #if FHERMA_FUSED_UNROLL
     #pragma unroll
+    #else
+    #pragma unroll 1
+    #endif
     for(unsigned pass=0;pass<Passes;++pass) {
-        unsigned half=1u<<(10-HarveyBits*(pass+1));
+        unsigned log_half=10-HarveyBits*(pass+1),half=1u<<log_half;
         unsigned j=t&(half-1),i=HarveyRadix*(t-j)+j;
         uint32_t x[HarveyRadix],y[HarveyRadix];
         #pragma unroll
@@ -618,10 +625,10 @@ template<bool Lazy> __global__ void harvey_convolution_tile(const uint32_t* oper
         }
         #pragma unroll
         for(unsigned phase=0;phase<HarveyBits;++phase) {
-            unsigned step=(HarveyRadix/2)>>phase,h=step*half;
+            unsigned step=(HarveyRadix/2)>>phase,root_shift=log_half+HarveyBits-phase;
             #pragma unroll
             for(unsigned group=0;group<HarveyRadix;group+=2*step) {
-                Twiddle w=forward[n/(2*h)+(begin+i+group*half)/(2*h)];
+                Twiddle w=forward[(n>>root_shift)+((begin+i+(group<<log_half))>>root_shift)];
                 #pragma unroll
                 for(unsigned lane=0;lane<step;++lane) {
                     harvey_pair<false,Lazy>(x[group+lane],x[group+lane+step],w,p);
@@ -673,18 +680,22 @@ template<bool Lazy> __global__ void harvey_convolution_tile(const uint32_t* oper
             a[harvey_index<true>(i+lane)]=products[k*LastRadix+lane];
     }
     __syncthreads();
+    #if FHERMA_FUSED_UNROLL
     #pragma unroll
+    #else
+    #pragma unroll 1
+    #endif
     for(unsigned pass=0;pass<Passes;++pass) {
-        unsigned half=1u<<(HarveyBits*pass),j=t&(half-1),i=HarveyRadix*(t-j)+j;
+        unsigned log_half=HarveyBits*pass,half=1u<<log_half,j=t&(half-1),i=HarveyRadix*(t-j)+j;
         uint32_t x[HarveyRadix];
         #pragma unroll
         for(unsigned k=0;k<HarveyRadix;++k) x[k]=a[harvey_index<true>(i+k*half)];
         #pragma unroll
         for(unsigned phase=0;phase<HarveyBits;++phase) {
-            unsigned step=1u<<phase,h=step*half;
+            unsigned step=1u<<phase,root_shift=log_half+phase+1;
             #pragma unroll
             for(unsigned group=0;group<HarveyRadix;group+=2*step) {
-                Twiddle w=inverse[n/(2*h)+(begin+i+group*half)/(2*h)];
+                Twiddle w=inverse[(n>>root_shift)+((begin+i+(group<<log_half))>>root_shift)];
                 #pragma unroll
                 for(unsigned lane=0;lane<step;++lane)
                     harvey_pair<true,Lazy>(x[group+lane],x[group+lane+step],w,p);
