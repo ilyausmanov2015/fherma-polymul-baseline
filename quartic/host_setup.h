@@ -3,6 +3,9 @@
 #ifndef FHERMA_QUARTIC_TILE
 #define FHERMA_QUARTIC_TILE 1024
 #endif
+#ifndef FHERMA_LAZY_NTT
+#define FHERMA_LAZY_NTT 1
+#endif
 namespace quartic {
 constexpr unsigned ModCount=16,Components=4,PrimeCount=ModCount*Components;
 constexpr unsigned AbiWords=28,PartBits=217,PartWords=7,WideWords=16,Tile=FHERMA_QUARTIC_TILE;
@@ -38,23 +41,27 @@ struct Setup {
 inline Setup setup(unsigned n,uint32_t delta) {
     if(n<2 || n>32768 || (n&(n-1)) || delta==0 || delta>=0x10000000u)
         throw std::runtime_error("quartic parameter range");
-    Setup s;s.product=host_wide::small(WideWords,1);
-    uint32_t candidate=(uint32_t(1)<<31)-65535;
-    while(s.mods.size()<ModCount) {
-        if(candidate<=std::numeric_limits<uint32_t>::max()/3)
-            throw std::runtime_error("quartic prime search exhausted");
-        if(rns::prime(candidate) && pow_mod(delta,(candidate-1)/4,candidate)==1) {
-            uint32_t base=(uint64_t(1)<<32)%candidate;
-            s.mods.push_back({candidate,base,twiddle(base,candidate).shoup,0,
-                              std::numeric_limits<uint64_t>::max()/candidate});
-            rns::mul_small(s.product,candidate);
-        }
-        candidate-=65536;
-    }
+    Setup s;
     Words part(PartWords,0xffffffffu);part.back()=(uint32_t(1)<<25)-1;
     s.bound=rns::multiply(part,part);s.bound.resize(WideWords);
     rns::mul_small(s.bound,n);rns::mul_small(s.bound,1+3*delta);
     auto four_bound=s.bound;rns::mul_small(four_bound,4);
+    for(unsigned bits=FHERMA_LAZY_NTT ? 30 : 31;bits<=31;++bits) {
+        s.mods.clear();s.product=host_wide::small(WideWords,1);
+        uint32_t candidate=(uint32_t(1)<<bits)-65535;
+        while(s.mods.size()<ModCount) {
+            if(candidate<=(uint32_t(1)<<(bits-1)))
+                throw std::runtime_error("quartic prime search exhausted");
+            if(rns::prime(candidate) && pow_mod(delta,(candidate-1)/4,candidate)==1) {
+                uint32_t base=(uint64_t(1)<<32)%candidate;
+                s.mods.push_back({candidate,base,twiddle(base,candidate).shoup,0,
+                                  std::numeric_limits<uint64_t>::max()/candidate});
+                rns::mul_small(s.product,candidate);
+            }
+            candidate-=65536;
+        }
+        if(host_wide::cmp(s.product,four_bound)>0) break;
+    }
     if(host_wide::cmp(s.product,four_bound)<=0) throw std::runtime_error("quartic CRT range insufficient");
     auto sum_bound=s.product;rns::mul_small(sum_bound,ModCount);
     s.roots.resize(ModCount);s.bases.reserve(ModCount*WideWords);

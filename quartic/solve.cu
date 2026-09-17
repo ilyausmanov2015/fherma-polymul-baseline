@@ -118,6 +118,17 @@ __device__ uint32_t multiply_mod(uint32_t a,uint32_t b,const SmallMod& modulus) 
     uint32_t result=uint32_t(product-quotient*modulus.p);
     return result>=modulus.p ? result-modulus.p : result;
 }
+template<bool Lazy> __device__ inline uint32_t ntt_add(uint32_t a,uint32_t b,uint32_t p) {
+    return add_mod(a,b,Lazy ? 2*p : p);
+}
+template<bool Lazy> __device__ inline uint32_t ntt_sub(uint32_t a,uint32_t b,uint32_t p) {
+    return sub_mod(a,b,Lazy ? 2*p : p);
+}
+template<bool Lazy> __device__ inline uint32_t ntt_shoup(uint32_t a,Twiddle w,uint32_t p) {
+    uint32_t result=a*w.value-__umulhi(a,w.shoup)*p;
+    if constexpr(Lazy) return result; // 0 <= result < 2p; 4p fits uint32_t.
+    return result>=p ? result-p : result;
+}
 // ABI coefficients are AoS. Transpose once so all 16 residue transforms
 // read a limb plane in contiguous warp-wide transactions.
 __global__ void transpose_inputs(const uint32_t* input,uint32_t* output,unsigned n,unsigned begin=0,unsigned count=0,bool packed=false) {
@@ -202,7 +213,7 @@ template<bool Product> __device__ inline uint32_t small_value(
         return multiply_mod(paired[channel*n+index],paired[(PrimeCount+channel)*n+index],modulus);
     }
 }
-template<bool Product> __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n,const uint32_t* paired=nullptr,unsigned logn=0) {
+template<bool Product,bool Lazy> __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n,const uint32_t* paired=nullptr,unsigned logn=0) {
     __shared__ uint32_t tile[Tile];
     unsigned t=threadIdx.x,prime_i=blockIdx.y%ModCount;
     values+=blockIdx.y*n+blockIdx.x*Tile;
@@ -225,8 +236,8 @@ template<bool Product> __global__ void small_rns(uint32_t* values,const SmallMod
                 #pragma unroll
                 for(unsigned k=lane;k<8;k+=2*step) {
                     uint32_t u=x[k],v=x[k+step];
-                    if(exponent) v=shoup(v,w,p);
-                    x[k]=add_mod(u,v,p);x[k+step]=sub_mod(u,v,p);
+                    if(exponent) v=ntt_shoup<Lazy>(v,w,p);
+                    x[k]=ntt_add<Lazy>(u,v,p);x[k+step]=ntt_sub<Lazy>(u,v,p);
                 }
             }
         }
@@ -244,8 +255,8 @@ template<bool Product> __global__ void small_rns(uint32_t* values,const SmallMod
         #pragma unroll
         for(unsigned k=0;k<4;++k) {
             unsigned j=t+k*Tile/8;
-            uint32_t u=tile[small_index(j)],v=shoup(tile[small_index(j+Tile/2)],tables[2*j],p);
-            values[j]=add_mod(u,v,p);values[j+Tile/2]=sub_mod(u,v,p);
+            uint32_t u=tile[small_index(j)],v=ntt_shoup<Lazy>(tile[small_index(j+Tile/2)],tables[2*j],p);
+            values[j]=ntt_add<Lazy>(u,v,p);values[j+Tile/2]=ntt_sub<Lazy>(u,v,p);
         }
     }
 #elif FHERMA_RNS_RADIX4
@@ -257,18 +268,18 @@ template<bool Product> __global__ void small_rns(uint32_t* values,const SmallMod
         uint32_t x0=tile[small_index(i)],x1=tile[small_index(i+half)],x2=tile[small_index(i+2*half)],x3=tile[small_index(i+3*half)];
         if(j!=0) {
             Twiddle w=tables[j*(Tile/half)];
-            x1=shoup(x1,w,p);x3=shoup(x3,w,p);
+            x1=ntt_shoup<Lazy>(x1,w,p);x3=ntt_shoup<Lazy>(x3,w,p);
         }
-        uint32_t a0=add_mod(x0,x1,p),a1=sub_mod(x0,x1,p);
-        uint32_t a2=add_mod(x2,x3,p),a3=sub_mod(x2,x3,p);
-        if(j!=0) a2=shoup(a2,tables[j*(Tile/(2*half))],p);
-        a3=shoup(a3,tables[(j+half)*(Tile/(2*half))],p);
+        uint32_t a0=ntt_add<Lazy>(x0,x1,p),a1=ntt_sub<Lazy>(x0,x1,p);
+        uint32_t a2=ntt_add<Lazy>(x2,x3,p),a3=ntt_sub<Lazy>(x2,x3,p);
+        if(j!=0) a2=ntt_shoup<Lazy>(a2,tables[j*(Tile/(2*half))],p);
+        a3=ntt_shoup<Lazy>(a3,tables[(j+half)*(Tile/(2*half))],p);
         if(half==Tile/4) {
-            values[i]=add_mod(a0,a2,p);values[i+2*half]=sub_mod(a0,a2,p);
-            values[i+half]=add_mod(a1,a3,p);values[i+3*half]=sub_mod(a1,a3,p);
+            values[i]=ntt_add<Lazy>(a0,a2,p);values[i+2*half]=ntt_sub<Lazy>(a0,a2,p);
+            values[i+half]=ntt_add<Lazy>(a1,a3,p);values[i+3*half]=ntt_sub<Lazy>(a1,a3,p);
         } else {
-            tile[small_index(i)]=add_mod(a0,a2,p);tile[small_index(i+2*half)]=sub_mod(a0,a2,p);
-            tile[small_index(i+half)]=add_mod(a1,a3,p);tile[small_index(i+3*half)]=sub_mod(a1,a3,p);
+            tile[small_index(i)]=ntt_add<Lazy>(a0,a2,p);tile[small_index(i+2*half)]=ntt_sub<Lazy>(a0,a2,p);
+            tile[small_index(i+half)]=ntt_add<Lazy>(a1,a3,p);tile[small_index(i+3*half)]=ntt_sub<Lazy>(a1,a3,p);
             __syncthreads();
         }
     }
@@ -278,8 +289,8 @@ template<bool Product> __global__ void small_rns(uint32_t* values,const SmallMod
     unsigned stride=Tile;
     for(unsigned half=1;half<Tile;half*=2,stride>>=1) {
         unsigned j=t&(half-1),i=2*(t-j)+j;
-        uint32_t u=tile[small_index(i)],v=shoup(tile[small_index(i+half)],tables[j*stride],p);
-        tile[small_index(i)]=add_mod(u,v,p);tile[small_index(i+half)]=sub_mod(u,v,p);
+        uint32_t u=tile[small_index(i)],v=ntt_shoup<Lazy>(tile[small_index(i+half)],tables[j*stride],p);
+        tile[small_index(i)]=ntt_add<Lazy>(u,v,p);tile[small_index(i+half)]=ntt_sub<Lazy>(u,v,p);
         __syncthreads();
     }
     values[t]=tile[small_index(t)];values[t+Tile/2]=tile[small_index(t+Tile/2)];
@@ -290,7 +301,7 @@ template<bool Product> __global__ void small_rns(uint32_t* values,const SmallMod
 __device__ inline unsigned small_dif_index(unsigned x) {
     return x^(((x>>5)&7)<<1)^((x>>5)&1)^((x>>3)&16);
 }
-__global__ void small_dif_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
+template<bool Lazy> __global__ void small_dif_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
     static_assert(!FHERMA_DIF_FORWARD || (Tile==1024 && FHERMA_RNS_TAIL),"DIF requires 1024-element tiles and the tail path");
     __shared__ uint32_t tile[Tile];
     unsigned t=threadIdx.x,pi=blockIdx.y%ModCount;
@@ -312,8 +323,8 @@ __global__ void small_dif_rns(uint32_t* values,const SmallMod* mods,const Twiddl
                 #pragma unroll
                 for(unsigned k=lane;k<8;k+=2*step) {
                     uint32_t u=x[k],v=x[k+step];
-                    x[k]=add_mod(u,v,p);x[k+step]=sub_mod(u,v,p);
-                    if(exponent) x[k+step]=shoup(x[k+step],w,p);
+                    x[k]=ntt_add<Lazy>(u,v,p);x[k+step]=ntt_sub<Lazy>(u,v,p);
+                    if(exponent) x[k+step]=ntt_shoup<Lazy>(x[k+step],w,p);
                 }
             }
         }
@@ -325,13 +336,13 @@ __global__ void small_dif_rns(uint32_t* values,const SmallMod* mods,const Twiddl
     for(unsigned k=0;k<4;++k) {
         unsigned i=2*(t+k*Tile/8);
         uint32_t u=tile[small_dif_index(i)],v=tile[small_dif_index(i+1)];
-        values[i]=add_mod(u,v,p);values[i+1]=sub_mod(u,v,p);
+        values[i]=ntt_add<Lazy>(u,v,p);values[i+1]=ntt_sub<Lazy>(u,v,p);
     }
 }
 // The five large DIF stages operate on a column of the [32][1024] layout.
 // Restore this layout before the contiguous small DIF tiles, using two shared
 // transposes and register shuffles between butterflies.
-__global__ void tail_dif_rns(const uint32_t* source,uint32_t* destination,const SmallMod* mods,
+template<bool Lazy> __global__ void tail_dif_rns(const uint32_t* source,uint32_t* destination,const SmallMod* mods,
                              const Twiddle* tables,unsigned n) {
     __shared__ uint32_t tile[TailColumns*(TailRows+1)];
     unsigned t=threadIdx.x,pi=blockIdx.y%ModCount,column_base=blockIdx.x*TailColumns;
@@ -344,14 +355,14 @@ __global__ void tail_dif_rns(const uint32_t* source,uint32_t* destination,const 
     __syncthreads();
     unsigned column=column_base+t/(TailRows/2),k=t%(TailRows/2),offset=(t/(TailRows/2))*(TailRows+1);
     uint32_t p=mods[pi].p,u=tile[offset+k],v=tile[offset+k+TailRows/2];
-    uint32_t lower=add_mod(u,v,p),upper=shoup(sub_mod(u,v,p),tables[Tile*(TailRows/2-1)+column*(TailRows/2)+k],p);
+    uint32_t lower=ntt_add<Lazy>(u,v,p),upper=ntt_shoup<Lazy>(ntt_sub<Lazy>(u,v,p),tables[Tile*(TailRows/2-1)+column*(TailRows/2)+k],p);
     #pragma unroll
     for(unsigned half=TailRows/4;half;half/=2) {
         uint32_t peer_lower=__shfl_xor_sync(0xffffffff,lower,half,TailRows/2);
         uint32_t peer_upper=__shfl_xor_sync(0xffffffff,upper,half,TailRows/2);
         u=(k&half) ? peer_upper : lower;v=(k&half) ? upper : peer_lower;
         unsigned j=k&(half-1);
-        lower=add_mod(u,v,p);upper=shoup(sub_mod(u,v,p),tables[Tile*(half-1)+column*half+j],p);
+        lower=ntt_add<Lazy>(u,v,p);upper=ntt_shoup<Lazy>(ntt_sub<Lazy>(u,v,p),tables[Tile*(half-1)+column*half+j],p);
     }
     tile[offset+2*k]=lower;tile[offset+2*k+1]=upper;
     __syncthreads();
@@ -361,15 +372,15 @@ __global__ void tail_dif_rns(const uint32_t* source,uint32_t* destination,const 
         destination[row*Tile+column_base+column]=tile[column*(TailRows+1)+row];
     }
 }
-__global__ void stage_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,
+template<bool Lazy> __global__ void stage_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,
                            unsigned n,unsigned half,unsigned stride) {
     unsigned k=blockIdx.x*blockDim.x+threadIdx.x;
     if(k>=n/2) return;
     unsigned prime_i=blockIdx.y%ModCount,j=k&(half-1),i=2*(k-j)+j;
     uint32_t p=mods[prime_i].p;
     values+=blockIdx.y*n;
-    uint32_t u=values[i],v=shoup(values[i+half],tables[prime_i*n+j*stride],p);
-    values[i]=add_mod(u,v,p);values[i+half]=sub_mod(u,v,p);
+    uint32_t u=values[i],v=ntt_shoup<Lazy>(values[i+half],tables[prime_i*n+j*stride],p);
+    values[i]=ntt_add<Lazy>(u,v,p);values[i+half]=ntt_sub<Lazy>(u,v,p);
 }
 // [prime][TailRows][Tile] -> [prime][Tile][TailRows], padded transpose.
 __global__ void transpose_rns(const uint32_t* source,uint32_t* destination,unsigned n) {
@@ -380,7 +391,7 @@ __global__ void transpose_rns(const uint32_t* source,uint32_t* destination,unsig
     __syncthreads();
     for(unsigned dy=0;dy<32;dy+=8) if(x<TailRows) destination[(column+y+dy)*TailRows+x]=tile[x*33+y+dy];
 }
-__global__ void tail_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
+template<bool Lazy> __global__ void tail_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
     __shared__ uint32_t tile[256];
     unsigned t=threadIdx.x,prime_i=blockIdx.y%ModCount;
     unsigned column=blockIdx.x*TailColumns+t/(TailRows/2),k=t%(TailRows/2),offset=(t/(TailRows/2))*TailRows;
@@ -390,14 +401,14 @@ __global__ void tail_rns(uint32_t* values,const SmallMod* mods,const Twiddle* ta
     __syncthreads();
     for(unsigned half=1;half<TailRows;half*=2) {
         unsigned j=k&(half-1),i=offset+2*(k-j)+j;
-        uint32_t u=tile[i],v=shoup(tile[i+half],tables[Tile*(half-1)+column*half+j],p);
-        tile[i]=add_mod(u,v,p);tile[i+half]=sub_mod(u,v,p);
+        uint32_t u=tile[i],v=ntt_shoup<Lazy>(tile[i+half],tables[Tile*(half-1)+column*half+j],p);
+        tile[i]=ntt_add<Lazy>(u,v,p);tile[i+half]=ntt_sub<Lazy>(u,v,p);
         __syncthreads();
     }
     values[t]=tile[t];values[t+128]=tile[t+128];
 }
 // Transpose adjacent columns while executing the remaining tail stages.
-__global__ void fused_tail_rns(const uint32_t* source,uint32_t* destination,const SmallMod* mods,
+template<bool Lazy> __global__ void fused_tail_rns(const uint32_t* source,uint32_t* destination,const SmallMod* mods,
                                const Twiddle* tables,unsigned n) {
     __shared__ uint32_t tile[TailColumns*(TailRows+1)];
     unsigned t=threadIdx.x,prime_i=blockIdx.y%ModCount,column_base=blockIdx.x*TailColumns;
@@ -412,8 +423,8 @@ __global__ void fused_tail_rns(const uint32_t* source,uint32_t* destination,cons
     uint32_t p=mods[prime_i].p;
 #if FHERMA_SHUFFLE_TAIL
     uint32_t u=tile[offset+2*k];
-    uint32_t v=shoup(tile[offset+2*k+1],tables[column],p);
-    uint32_t lower=add_mod(u,v,p),upper=sub_mod(u,v,p);
+    uint32_t v=ntt_shoup<Lazy>(tile[offset+2*k+1],tables[column],p);
+    uint32_t lower=ntt_add<Lazy>(u,v,p),upper=ntt_sub<Lazy>(u,v,p);
     #pragma unroll
     for(unsigned half=2;half<TailRows;half*=2) {
         // Redistribute the preceding butterfly pairs entirely in registers.
@@ -422,16 +433,16 @@ __global__ void fused_tail_rns(const uint32_t* source,uint32_t* destination,cons
         u=(k&(half/2)) ? peer_upper : lower;
         v=(k&(half/2)) ? upper : peer_lower;
         unsigned j=k&(half-1);
-        v=shoup(v,tables[Tile*(half-1)+column*half+j],p);
-        lower=add_mod(u,v,p);upper=sub_mod(u,v,p);
+        v=ntt_shoup<Lazy>(v,tables[Tile*(half-1)+column*half+j],p);
+        lower=ntt_add<Lazy>(u,v,p);upper=ntt_sub<Lazy>(u,v,p);
     }
     unsigned output=(t/(TailRows/2))*TailRows+k;
     destination[output]=lower;destination[output+TailRows/2]=upper;
 #else
     for(unsigned half=1;half<TailRows;half*=2) {
         unsigned j=k&(half-1),i=offset+2*(k-j)+j;
-        uint32_t u=tile[i],v=shoup(tile[i+half],tables[Tile*(half-1)+column*half+j],p);
-        tile[i]=add_mod(u,v,p);tile[i+half]=sub_mod(u,v,p);
+        uint32_t u=tile[i],v=ntt_shoup<Lazy>(tile[i+half],tables[Tile*(half-1)+column*half+j],p);
+        tile[i]=ntt_add<Lazy>(u,v,p);tile[i+half]=ntt_sub<Lazy>(u,v,p);
         __syncthreads();
     }
     destination[2*t]=tile[offset+2*k];destination[2*t+1]=tile[offset+2*k+1];
@@ -469,7 +480,7 @@ template<unsigned Component> __device__ Big fold_component(const Wide& magnitude
     if(folded>=q) folded=folded-q;
     return folded;
 }
-__global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const SmallMod* mods,
+template<bool Lazy> __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const SmallMod* mods,
                                 const Twiddle* scales,const uint32_t* bases,const Roots* roots,
                                 const uint32_t* q_words,const uint32_t* product,unsigned n) {
     static_assert(CrtOutputs==32,"one warp per quartic component");
@@ -481,6 +492,9 @@ __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const 
         auto modulus=mods[pi];uint32_t p=modulus.p;
         uint32_t a=residues[pi*n+i],b=residues[(ModCount+pi)*n+i];
         uint32_t c=residues[(2*ModCount+pi)*n+i],d=residues[(3*ModCount+pi)*n+i],mixed;
+        if constexpr(Lazy) {
+            if(a>=p) a-=p;if(b>=p) b-=p;if(c>=p) c-=p;if(d>=p) d-=p;
+        }
         if(component==0 || component==2) {
             uint32_t u=add_mod(a,c,p),v=add_mod(b,d,p);
             mixed=component==0 ? add_mod(u,v,p) : sub_mod(u,v,p);
@@ -537,7 +551,7 @@ void check(cudaError_t status,const char* operation) {
 struct State {
     HostCopyPool copy;
     unsigned n=0,logn=0;
-    bool overlap_input=false;
+    bool overlap_input=false,lazy_ntt=false;
     uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
     uint32_t *q=nullptr,*product=nullptr,*host_input=nullptr,*host_output=nullptr;
     SmallMod* mods=nullptr; Roots* roots=nullptr;
@@ -599,7 +613,7 @@ void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stre
     prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true);
     check(cudaGetLastError(),"RNS input chunk kernels");
 }
-void launch_rns(State& s,cudaStream_t stream=nullptr) {
+template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
     bool dif_forward=FHERMA_DIF_FORWARD && s.n==32768;
     uint32_t* prepared=s.ab;
@@ -619,28 +633,28 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     uint32_t* forward_values=prepared;
     if(dif_forward) {
         dim3 tails(128,2*PrimeCount),tiles(s.n/Tile,2*PrimeCount);
-        tail_dif_rns<<<tails,128,0,stream>>>(prepared,s.scratch,s.mods,s.tail_forward,s.n);
-        small_dif_rns<<<tiles,Tile/8,0,stream>>>(s.scratch,s.mods,s.small_forward,s.n);
+        tail_dif_rns<Lazy><<<tails,128,0,stream>>>(prepared,s.scratch,s.mods,s.tail_forward,s.n);
+        small_dif_rns<Lazy><<<tiles,Tile/8,0,stream>>>(s.scratch,s.mods,s.small_forward,s.n);
         forward_values=s.scratch;
         first=Tile;
     } else {
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,2*PrimeCount);
-        small_rns<false><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(prepared,s.mods,s.small_forward,s.n);
+        small_rns<false,Lazy><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(prepared,s.mods,s.small_forward,s.n);
         first=Tile;
     }
     if(FHERMA_RNS_TAIL && s.n==32768) {
         dim3 transposes(Tile/32,2*PrimeCount),tails(128,2*PrimeCount);
         uint32_t* transposed=s.overlap_input ? s.ab : s.scratch;
         if(FHERMA_RNS_FUSED_TRANSPOSE) {
-            fused_tail_rns<<<tails,128,0,stream>>>(prepared,transposed,s.mods,s.tail_forward,s.n);
+            fused_tail_rns<Lazy><<<tails,128,0,stream>>>(prepared,transposed,s.mods,s.tail_forward,s.n);
         } else {
             transpose_rns<<<transposes,256,0,stream>>>(prepared,transposed,s.n);
-            tail_rns<<<tails,128,0,stream>>>(transposed,s.mods,s.tail_forward,s.n);
+            tail_rns<Lazy><<<tails,128,0,stream>>>(transposed,s.mods,s.tail_forward,s.n);
         }
         forward_values=transposed;
     } else for(unsigned h=first;h<s.n;h*=2)
-        stage_rns<<<half,128,0,stream>>>(s.ab,s.mods,s.forward,s.n,h,s.n/h);
+        stage_rns<Lazy><<<half,128,0,stream>>>(s.ab,s.mods,s.forward,s.n,h,s.n/h);
     }
     mark(s,3,stream);
     dim3 inverse_full(full.x,PrimeCount),inverse_half(half.x,PrimeCount);
@@ -650,28 +664,32 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,PrimeCount);
         if(fused_product)
-            small_rns<true><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n,forward_values,s.logn);
+            small_rns<true,Lazy><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n,forward_values,s.logn);
         else
-            small_rns<false><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
+            small_rns<false,Lazy><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(s.c,s.mods,s.small_inverse,s.n);
     }
     uint32_t* inverse_values=s.c;
     if(FHERMA_RNS_TAIL && s.n==32768) {
         dim3 transposes(Tile/32,PrimeCount),tails(128,PrimeCount);
         if(FHERMA_RNS_FUSED_TRANSPOSE) {
-            fused_tail_rns<<<tails,128,0,stream>>>(s.c,s.ab,s.mods,s.tail_inverse,s.n);
+            fused_tail_rns<Lazy><<<tails,128,0,stream>>>(s.c,s.ab,s.mods,s.tail_inverse,s.n);
         } else {
             transpose_rns<<<transposes,256,0,stream>>>(s.c,s.ab,s.n);
-            tail_rns<<<tails,128,0,stream>>>(s.ab,s.mods,s.tail_inverse,s.n);
+            tail_rns<Lazy><<<tails,128,0,stream>>>(s.ab,s.mods,s.tail_inverse,s.n);
         }
         inverse_values=s.ab;
     } else for(unsigned h=first;h<s.n;h*=2)
-        stage_rns<<<inverse_half,128,0,stream>>>(s.c,s.mods,s.inverse,s.n,h,s.n/h);
+        stage_rns<Lazy><<<inverse_half,128,0,stream>>>(s.c,s.mods,s.inverse,s.n,h,s.n/h);
     mark(s,5,stream);
     unsigned crt_blocks=(s.n+CrtOutputs-1)/CrtOutputs;
-    reconstruct_rns<<<crt_blocks,128,0,stream>>>(inverse_values,FHERMA_MAPPED_OUTPUT ? s.host_output : s.input,s.mods,s.scale,s.bases,s.roots,
+    reconstruct_rns<Lazy><<<crt_blocks,128,0,stream>>>(inverse_values,FHERMA_MAPPED_OUTPUT ? s.host_output : s.input,s.mods,s.scale,s.bases,s.roots,
                                             s.q,s.product,s.n);
     mark(s,6,stream);
     check(cudaGetLastError(),"RNS kernels");
+}
+void launch_rns(State& s,cudaStream_t stream=nullptr) {
+    if(s.lazy_ntt) launch_rns_impl<true>(s,stream);
+    else launch_rns_impl<false>(s,stream);
 }
 } // namespace
 
@@ -706,6 +724,7 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(!FHERMA_OVERLAP_PREPARE || (!FHERMA_PROFILE && !FHERMA_RNS_GROUPED),"chunk prepare uses SoA without diagnostic events");
     static_assert(FHERMA_PIPELINE_INPUT>0 && (32768%FHERMA_PIPELINE_INPUT)==0,"input chunks must contain whole coefficients");
     auto constants=quartic::setup(p.N,delta);
+    s->lazy_ntt=FHERMA_LAZY_NTT && constants.mods[0].p<(uint32_t(1)<<30);
     upload(s->input_powers,constants.input_powers);upload(s->roots,constants.roots);
     upload(s->mods,constants.mods);upload(s->bases,constants.bases);
     upload(s->product,constants.product);upload(s->q,p.q.data);
