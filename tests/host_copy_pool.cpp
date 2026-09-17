@@ -14,9 +14,13 @@ int main() {
         pool.inputs(got.data()+31,a.data()+15,b.data()+1,bytes);
         if(got!=expected) { std::fprintf(stderr,"inputs mismatch round=%u bytes=%zu\n",round,bytes); return 1; }
         std::vector<unsigned char> out(2*bytes+128,0xb3),reference=out;
+        pool.prefault(out.data()+7,2*bytes);
+        for(size_t i=0;i<out.size();++i) if((i<7 || i>=7+2*bytes) && out[i]!=0xb3) {
+            std::fprintf(stderr,"prefault guard mismatch round=%u bytes=%zu\n",round,bytes); return 1;
+        }
         std::memcpy(reference.data()+7,expected.data()+31,2*bytes);
         pool.output(out.data()+7,got.data()+31,2*bytes);
         if(out!=reference) { std::fprintf(stderr,"output mismatch round=%u bytes=%zu\n",round,bytes); return 1; }
     }
-    std::puts("Host pool: 700 sequential input/output jobs passed");
+    std::puts("Host pool: 1050 sequential copy/prefault jobs passed");
 }

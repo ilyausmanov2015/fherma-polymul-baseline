@@ -1,3 +1,6 @@
+#ifndef FHERMA_PREFAULT_OUTPUT
+#define FHERMA_PREFAULT_OUTPUT 1
+#endif
 #ifndef FHERMA_SMALL_TABLES
 #define FHERMA_SMALL_TABLES 1
 #endif
@@ -207,11 +210,33 @@ struct RegisteredInput {
 struct NextOutput {
     std::vector<uint32_t> data;
     bool registered=false;
-    void prepare(size_t words) {
-        // Padding separates registered page ranges even for small vectors.
-        data.resize(words+1024); data.resize(words);
+    double reserve_us=0,prefault_us=0,zero_us=0,register_us=0;
+    void prepare(size_t words,HostCopyPool* copy=nullptr) {
+#if FHERMA_HOST_PROFILE
+        using Clock=std::chrono::steady_clock;
+        auto start=Clock::now();
+#endif
+        // Keep a page of spare capacity between registered allocations.
+        data.reserve(words+1024);
+#if FHERMA_HOST_PROFILE
+        auto reserved=Clock::now();
+#endif
+        if(FHERMA_PREFAULT_OUTPUT && copy) copy->prefault(data.data(),words*4);
+#if FHERMA_HOST_PROFILE
+        auto touched=Clock::now();
+#endif
+        data.resize(words);
+#if FHERMA_HOST_PROFILE
+        auto zeroed=Clock::now();
+#endif
         check(cudaHostRegister(data.data(),words*4,0),"register next output");
         registered=true;
+#if FHERMA_HOST_PROFILE
+        auto pinned=Clock::now();
+        auto us=[](auto a,auto b) { return std::chrono::duration<double,std::micro>(b-a).count(); };
+        reserve_us=us(start,reserved); prefault_us=us(reserved,touched);
+        zero_us=us(touched,zeroed); register_us=us(zeroed,pinned);
+#endif
     }
     void take(std::vector<uint32_t>& out,RegisteredInput& registration) {
         if(!registered) throw std::runtime_error("output buffer unavailable after a failed run");
@@ -563,7 +588,11 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #if FHERMA_HOST_PROFILE
         enqueued=HostClock::now();
 #endif
+#if FHERMA_PARALLEL_COPY
+        s.next_output.prepare(words,&s.copy);
+#else
         s.next_output.prepare(words);
+#endif
 #if FHERMA_HOST_PROFILE
         prepared=HostClock::now();
 #endif
@@ -578,6 +607,8 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     auto us=[](auto start,auto end) { return std::chrono::duration<double,std::micro>(end-start).count(); };
     std::fprintf(stderr,"HOST_GRAPH_US pack=%.3f enqueue=%.3f prepare_output=%.3f wait=%.3f unregister=%.3f\n",
                  us(pack_start,pack_end),us(pack_end,enqueued),us(enqueued,prepared),us(prepared,synced),us(synced,released));
+    std::fprintf(stderr,"HOST_ALLOC_US reserve=%.3f prefault=%.3f zero=%.3f register=%.3f\n",
+                 s.next_output.reserve_us,s.next_output.prefault_us,s.next_output.zero_us,s.next_output.register_us);
 #endif
 #else
     check(cudaGraphLaunch(s.graph,s.stream),"execute graph");
@@ -624,7 +655,11 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     RegisteredInput output_registration;
     s.next_output.take(out.c.data,output_registration);
     check(cudaMemcpy(out.c.data.data(),s.input,bytes,cudaMemcpyDeviceToHost),"direct output D2H");
+#if FHERMA_PARALLEL_COPY
+    s.next_output.prepare(words,&s.copy);
+#else
     s.next_output.prepare(words);
+#endif
     output_registration.release();
     registered_a.release(); registered_b.release();
 #if FHERMA_PROFILE

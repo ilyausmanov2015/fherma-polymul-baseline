@@ -24,7 +24,7 @@
 class HostCopyPool {
     static constexpr unsigned Threads=FHERMA_COPY_THREADS;
     static_assert(Threads>=2 && Threads%2==0,"even copy thread count required");
-    struct Job { const char *a=nullptr,*b=nullptr; char* out=nullptr; size_t bytes=0; } job_;
+    struct Job { const char *a=nullptr,*b=nullptr; char* out=nullptr; size_t bytes=0; bool prefault=false; } job_;
     std::mutex mutex_;
     std::condition_variable start_,done_;
     std::array<std::thread,Threads-1> workers_;
@@ -45,7 +45,10 @@ class HostCopyPool {
     }
 #endif
     static void part(const Job& job,unsigned rank) {
-        if(job.b) {
+        if(job.prefault) {
+            size_t begin=job.bytes*rank/Threads,end=job.bytes*(rank+1)/Threads;
+            for(size_t i=begin;i<end;i+=4096) job.out[i]=0;
+        } else if(job.b) {
             unsigned half=rank%(Threads/2);
             size_t begin=job.bytes*half/(Threads/2),end=job.bytes*(half+1)/(Threads/2);
             const char* source=rank<Threads/2 ? job.a : job.b;
@@ -129,6 +132,9 @@ public:
     ~HostCopyPool() { stop(); }
     void inputs(void* out,const void* a,const void* b,size_t bytes) {
         run({static_cast<const char*>(a),static_cast<const char*>(b),static_cast<char*>(out),bytes});
+    }
+    void prefault(void* storage,size_t bytes) {
+        run({nullptr,nullptr,static_cast<char*>(storage),bytes,true});
     }
     void output(void* out,const void* source,size_t bytes) {
         run({static_cast<const char*>(source),nullptr,static_cast<char*>(out),bytes});
