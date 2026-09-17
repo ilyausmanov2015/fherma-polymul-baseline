@@ -67,7 +67,7 @@
 #define FHERMA_SPIN_COPY 1
 #endif
 #ifndef FHERMA_STREAM_COPY
-#define FHERMA_STREAM_COPY 1
+#define FHERMA_STREAM_COPY 0
 #endif
 #include "fherma.h"
 #include "rns/host_setup.h"
