@@ -1,8 +1,11 @@
+#ifndef FHERMA_INPUT_2D
+#define FHERMA_INPUT_2D 1
+#endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 1
+#define FHERMA_OUTPUT_GRAPH 0
 #endif
 #ifndef FHERMA_TRANSFER_GRAPHS
-#define FHERMA_TRANSFER_GRAPHS 1
+#define FHERMA_TRANSFER_GRAPHS 0
 #endif
 #ifndef FHERMA_CHUNK_GRAPHS
 #define FHERMA_CHUNK_GRAPHS 0
@@ -742,8 +745,13 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
                 return;
             }
             auto transfer=s.overlap_input ? s.transfer_stream : s.stream;
-            check(cudaMemcpyAsync(s.input+begin,a,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline A H2D");
-            check(cudaMemcpyAsync(s.input+words+begin,b,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline B H2D");
+            if(FHERMA_INPUT_2D) {
+                // The CPU pipeline packs A and B adjacently for each chunk.
+                check(cudaMemcpy2DAsync(s.input+begin,words*4,a,count*4,count*4,2,cudaMemcpyHostToDevice,transfer),"RNS paired chunk H2D");
+            } else {
+                check(cudaMemcpyAsync(s.input+begin,a,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline A H2D");
+                check(cudaMemcpyAsync(s.input+words+begin,b,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline B H2D");
+            }
             if(s.overlap_input) {
                 check(cudaEventRecord(s.input_ready[input_part],transfer),"RNS input segment uploaded");
                 check(cudaStreamWaitEvent(s.stream,s.input_ready[input_part],0),"RNS prepare waits for input segment");
