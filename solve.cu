@@ -1,5 +1,8 @@
+#ifndef FHERMA_SPECIAL_ADD_SUB
+#define FHERMA_SPECIAL_ADD_SUB 1
+#endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 1
+#define FHERMA_HOST_PROFILE 0
 #endif
 #ifndef FHERMA_FUSED_TAIL
 #define FHERMA_FUSED_TAIL 1
@@ -48,7 +51,7 @@
 #define FHERMA_STREAM_COPY 1
 #endif
 #ifndef FHERMA_COPY_THREADS
-#define FHERMA_COPY_THREADS 4
+#define FHERMA_COPY_THREADS 2
 #endif
 #ifndef FHERMA_PARALLEL_OUTPUT
 #define FHERMA_PARALLEL_OUTPUT 0
@@ -136,6 +139,33 @@ __device__ Big multiply(const Big& a,const Big& b,const Big& q) {
     return p.lo;
 }
 #endif
+__device__ Big butterfly_add(const Big& a,const Big& b,const Mod& q) {
+#if FHERMA_SPECIAL_ADD_SUB && !FHERMA_MONTGOMERY
+    Big sum=a+b;
+    uint32_t folded=(sum[27]>>4)*(uint32_t(0)-q[0]);
+    sum[27]=sum[27]&15u;
+    sum=sum+Big(folded);
+    // After folding, sum<2^868. Only the c-sized interval below 2^868
+    // can still need subtraction; compare the fixed all-one upper words.
+    uint32_t upper=sum[27]|0xfffffff0u;
+    #pragma unroll
+    for(unsigned k=1;k<27;++k) upper &= uint32_t(sum[k]);
+    if(upper==0xffffffffu && sum[0]>=q[0]) sum=sum-q;
+    return sum;
+#else
+    return a.add_mod(b,q);
+#endif
+}
+__device__ Big butterfly_sub(const Big& a,const Big& b,const Mod& q) {
+#if FHERMA_SPECIAL_ADD_SUB && !FHERMA_MONTGOMERY
+    Big difference=a-b;
+    uint32_t correction=(difference[27]>>31)*(uint32_t(0)-q[0]);
+    difference[27]=difference[27]&15u;
+    return difference-Big(correction);
+#else
+    return a.sub_mod(b,q);
+#endif
+}
 __device__ Mod load_modulus(const uint32_t* qp) {
 #if FHERMA_CONSTANT_MODULUS && !FHERMA_MONTGOMERY
     // init has checked these words, so they need no global loads or registers.
@@ -260,7 +290,7 @@ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
     const Mod q=load_modulus(qp);
     const Big u=load_coeff(values,i,n), v=load_coeff(values,i+half,n), tw=load_coeff(table,j*(n/half),n);
     auto t=(FHERMA_SKIP_IDENTITY && j==0) ? v : multiply(v,tw,q);
-    store_coeff(u.add_mod(t,q),values,i,n); store_coeff(u.sub_mod(t,q),values,i+half,n);
+    store_coeff(butterfly_add(u,t,q),values,i,n); store_coeff(butterfly_sub(u,t,q),values,i+half,n);
 }
 // Keep the first eight radix-2 stages in shared memory. Every block handles
 // an independent contiguous tile; no inter-block synchronization is needed.
@@ -282,8 +312,8 @@ void small_stages(uint32_t* values,const uint32_t* table,const uint32_t* qp,unsi
         const Big u=load_coeff(tile,i,256), v=load_coeff(tile,i+half,256);
         const Big tw=load_coeff(table,j*(n/half),n);
         const Big m=(FHERMA_SKIP_IDENTITY && j==0) ? v : multiply(v,tw,q);
-        store_coeff(u.add_mod(m,q),tile,i,256);
-        store_coeff(u.sub_mod(m,q),tile,i+half,256);
+        store_coeff(butterfly_add(u,m,q),tile,i,256);
+        store_coeff(butterfly_sub(u,m,q),tile,i+half,256);
         __syncthreads();
     }
     store_coeff(load_coeff(tile,2*t,256),values,base+2*t,n);
@@ -321,8 +351,8 @@ __global__ void tail_stages(uint32_t* values,const uint32_t* table,const uint32_
         const Big u=load_coeff(tile,i,256),v=load_coeff(tile,i+half,256);
         const Big tw=load_coeff(table,exponent,n);
         const Big m=(FHERMA_SKIP_IDENTITY && exponent==0) ? v : multiply(v,tw,q);
-        store_coeff(u.add_mod(m,q),tile,i,256);
-        store_coeff(u.sub_mod(m,q),tile,i+half,256);
+        store_coeff(butterfly_add(u,m,q),tile,i,256);
+        store_coeff(butterfly_sub(u,m,q),tile,i+half,256);
         __syncthreads();
     }
     store_coeff(load_coeff(tile,2*t,256),values,base+2*t,n);
