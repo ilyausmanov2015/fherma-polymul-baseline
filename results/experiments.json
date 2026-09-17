@@ -3064,5 +3064,37 @@
     "host_graph_us": [],
     "host_alloc_us": [],
     "host_staged_us": []
+  },
+  {
+    "id": "6aabe926b615118421bf83fa",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.440783203,
+    "started_at": "2026-09-17T13:20:39.871Z",
+    "finished_at": "2026-09-17T13:22:14.954Z",
+    "commit": "33b6ce473259d29865b70a6de6022ac9364c5cfc",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.000615565,
+          "median": 0.000634202,
+          "mean": 0.00063498,
+          "max": 0.000655173
+        }
+      }
+    ],
+    "case_errors": [],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": []
   }
 ]

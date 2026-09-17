@@ -14,7 +14,7 @@ int main() {
         if(!mpz_probab_prime_p(mpz_class(p).get_mpz_t(),30)) return 2;
         rns::Words basis(s.bases.begin()+i*56,s.bases.begin()+(i+1)*56);
         if(integer(basis)*p!=P) return 3;
-        rns::Words reduced(s.bases_mod_q.begin()+i*32,s.bases_mod_q.begin()+(i+1)*32);
+        rns::Words reduced(s.bases_mod_q.begin()+i*rns::AccumWords,s.bases_mod_q.begin()+(i+1)*rns::AccumWords);
         if(integer(reduced)!=integer(basis)%Q) return 6;
         mpz_class B=mpz_class(1)<<64,recip=B/p;
         if(recip.get_ui()!=s.mods[i].reciprocal) return 4;

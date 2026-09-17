@@ -4,7 +4,8 @@
 #include <limits>
 
 namespace rns {
-constexpr unsigned PrimeCount=57,WideWords=56,AccumWords=32,AbiWords=28,Tile=1024;
+constexpr unsigned PrimeCount=57,WideWords=56,AccumWords=29,AbiWords=28,Tile=1024;
+static_assert(AccumWords*32>=905,"compact CRT accumulation must fit the exact bound");
 struct Twiddle { uint32_t value,shoup; };
 struct SmallMod { uint32_t p,base,base_shoup,padding=0; uint64_t reciprocal; };
 using Words=std::vector<uint32_t>;

@@ -235,7 +235,7 @@ __global__ void product_rns(const uint32_t* ab,uint32_t* c,const SmallMod* mods,
     c[prime_i*n+(__brev(natural_index(i,n))>>(32-logn))]=multiply_mod(a,b,mods[prime_i]);
 }
 // Sum(t_i * (M_i mod q)) is below 57*2^31*q (< 2^905).
-// Fold the supported 1024-bit cuPQC accumulator back to the 868-bit ABI.
+// Fold the supported 928-bit cuPQC accumulator back to the 868-bit ABI.
 __device__ Big fold_crt(const Wide& value,const Big& q) {
     uint32_t c=uint32_t(0)-q[0],folded[29];uint64_t carry=0;
     #pragma unroll
