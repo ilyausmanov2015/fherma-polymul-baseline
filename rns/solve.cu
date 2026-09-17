@@ -1,3 +1,6 @@
+#ifndef FHERMA_OUTPUT_GRAPH
+#define FHERMA_OUTPUT_GRAPH 1
+#endif
 #ifndef FHERMA_TRANSFER_GRAPHS
 #define FHERMA_TRANSFER_GRAPHS 1
 #endif
@@ -695,6 +698,12 @@ void* fherma_init(const fherma::Point& p) {
     launch_rns(*s,s->stream);
 #if FHERMA_PIPELINE_OUTPUT<=1
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture RNS D2H");
+#elif FHERMA_OUTPUT_GRAPH
+    for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+        size_t words=size_t(s->n)*AbiWords,begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
+        check(cudaMemcpyAsync(s->host_output+begin,s->input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s->stream),"capture RNS output segment");
+        check(cudaEventRecordWithFlags(s->output_ready[part],s->stream,cudaEventRecordExternal),"capture RNS output signal");
+    }
 #endif
     mark(*s,7,s->stream);
     cudaGraph_t definition=nullptr;
@@ -751,7 +760,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     fherma::Outputs output;output.c.shape={s.n,rns::AbiWords};
 #if FHERMA_GRAPH
         check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
-#if FHERMA_PIPELINE_OUTPUT>1
+#if FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_OUTPUT_GRAPH
         for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
             size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
             check(cudaMemcpyAsync(s.host_output+begin,s.input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s.stream),"RNS pipeline D2H");
