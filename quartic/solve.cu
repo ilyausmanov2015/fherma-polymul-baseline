@@ -1,5 +1,8 @@
+#ifndef FHERMA_PIPELINE_PROFILE
+#define FHERMA_PIPELINE_PROFILE 1
+#endif
 #ifndef FHERMA_PREPARE_VECTOR
-#define FHERMA_PREPARE_VECTOR 1
+#define FHERMA_PREPARE_VECTOR 0
 #endif
 #ifndef FHERMA_OUTPUT_ALLOCATOR_SPIN
 #define FHERMA_OUTPUT_ALLOCATOR_SPIN 1
@@ -110,7 +113,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 0
+#define FHERMA_HOST_PROFILE 1
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -1062,8 +1065,11 @@ struct State {
     cudaEvent_t output_ready[FHERMA_PIPELINE_OUTPUT]{};
 #endif
 #endif
-#if FHERMA_PROFILE
+#if FHERMA_PROFILE || (FHERMA_PIPELINE_PROFILE && defined(__CUDACC__))
     cudaEvent_t events[8]{};
+#endif
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+    cudaEvent_t prepare_profile[2*FHERMA_PIPELINE_INPUT]{};
 #endif
     ~State() {
 #if defined(__CUDACC__) && FHERMA_INPUT_GRAPH && FHERMA_GRAPH
@@ -1083,8 +1089,11 @@ struct State {
         for(auto event:output_ready) if(event) cudaEventDestroy(event);
 #endif
 #endif
-#if FHERMA_PROFILE
+#if FHERMA_PROFILE || (FHERMA_PIPELINE_PROFILE && defined(__CUDACC__))
         for(auto event:events) if(event) cudaEventDestroy(event);
+#endif
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+        for(auto event:prepare_profile) if(event) cudaEventDestroy(event);
 #endif
         cudaFree(input);cudaFree(input_soa);cudaFree(ab);cudaFree(c);cudaFree(bases);cudaFree(scratch);
         cudaFree(q);cudaFree(product);cudaFree(mods);cudaFree(forward);cudaFree(inverse);
@@ -1104,7 +1113,7 @@ struct State {
 #endif
 }
 void mark(State& s,unsigned i,cudaStream_t stream=nullptr) {
-#if FHERMA_PROFILE
+#if FHERMA_PROFILE || (FHERMA_PIPELINE_PROFILE && defined(__CUDACC__))
 #if FHERMA_GRAPH
     // Ordinary captured events represent dependencies without a timestamp.
     // Explicit external nodes execute the event record on every replay.
@@ -1386,8 +1395,12 @@ void* fherma_init(const fherma::Point& p) {
 #if (FHERMA_INPUT_WC || FHERMA_OUTPUT_WC) && defined(__x86_64__) && defined(__GNUC__)
     _mm_mfence(); // Publish initialization of the empty WC staging buffers.
 #endif
-#if FHERMA_PROFILE
+#if FHERMA_PROFILE || (FHERMA_PIPELINE_PROFILE && defined(__CUDACC__))
     for(auto& event:s->events) check(cudaEventCreate(&event),"RNS profile event");
+#endif
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+    static_assert(FHERMA_GRAPH && FHERMA_MAPPED_INPUT && FHERMA_PIPELINE_INPUT>1 && FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_INPUT_GRAPH && !FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE,"diagnose the staged mapped pipeline");
+    for(auto& event:s->prepare_profile) check(cudaEventCreate(&event),"mapped prepare profile event");
 #endif
 #if FHERMA_GRAPH
     if(s->overlap_input) {
@@ -1395,7 +1408,7 @@ void* fherma_init(const fherma::Point& p) {
         for(auto& event:s->input_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"RNS input segment event");
     }
 #if FHERMA_PIPELINE_OUTPUT>1
-    for(auto& event:s->output_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"RNS output segment event");
+    for(auto& event:s->output_ready) check(cudaEventCreateWithFlags(&event,FHERMA_PIPELINE_PROFILE ? 0 : cudaEventDisableTiming),"RNS output segment event");
 #endif
 #if FHERMA_CRT_PIPELINE
     for(auto& event:s->crt_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"CRT chunk event");
@@ -1421,7 +1434,13 @@ void* fherma_init(const fherma::Point& p) {
     if(s->overlap_input && !s->input_graph) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
             check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS input chunk");
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+            check(cudaEventRecordWithFlags(s->prepare_profile[2*part],s->stream,cudaEventRecordExternal),"profile mapped prepare start");
+#endif
             launch_input_chunk(*s,s->n*part/FHERMA_PIPELINE_INPUT,s->n/FHERMA_PIPELINE_INPUT,s->stream);
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+            check(cudaEventRecordWithFlags(s->prepare_profile[2*part+1],s->stream,cudaEventRecordExternal),"profile mapped prepare end");
+#endif
             cudaGraph_t definition=nullptr;
             check(cudaStreamEndCapture(s->stream,&definition),"finish RNS input chunk capture");
             auto status=cudaGraphInstantiateWithFlags(&s->prepare_graph[part],definition,0);
@@ -1501,7 +1520,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
     fherma::Outputs output;output.c.shape={s.n,quartic::AbiWords};
 #if FHERMA_HOST_PROFILE
-    auto host_run_start=std::chrono::steady_clock::now();
+    [[maybe_unused]] auto host_run_start=std::chrono::steady_clock::now();
 #endif
 #if FHERMA_ASYNC_OUTPUT_ALLOC
     std::optional<HostOutputAllocator::Work> allocation_task;
@@ -1585,6 +1604,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
             size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
             check(cudaMemcpyAsync(s.host_output+begin,s.input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s.stream),"RNS pipeline D2H");
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+            check(cudaEventRecord(s.output_ready[part],s.stream),"profile output segment");
+#endif
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
             if(s.completion.enabled()) s.completion.record(s.stream,part);
             else
@@ -1694,6 +1716,25 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     }
     auto us=[](auto a,auto b) {return std::chrono::duration<double,std::micro>(b-a).count();};
     std::fprintf(stderr,"\nHOST_US pack=%.3f unpack=%.3f\n",us(pack_start,pack_end),us(unpack_start,unpack_end));
+#endif
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+    check(cudaStreamSynchronize(s.stream),"diagnostic timestamps ready");
+    auto interval=[](cudaEvent_t a,cudaEvent_t b) {
+        float milliseconds=0;check(cudaEventElapsedTime(&milliseconds,a,b),"diagnostic timestamp interval");
+        return 1000.0*milliseconds;
+    };
+    std::fprintf(stderr,"MAPPED_GPU_US");
+    if(s.overlap_input) {
+        for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part)
+            std::fprintf(stderr," prepare%u=%.3f",part,interval(s.prepare_profile[2*part],s.prepare_profile[2*part+1]));
+        std::fprintf(stderr," prepare_span=%.3f",interval(s.prepare_profile[0],s.prepare_profile[2*FHERMA_PIPELINE_INPUT-1]));
+    }
+    std::fprintf(stderr," forward=%.3f product=%.3f inverse=%.3f crt=%.3f",
+        interval(s.events[2],s.events[3]),interval(s.events[3],s.events[4]),
+        interval(s.events[4],s.events[5]),interval(s.events[5],s.events[6]));
+    for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part)
+        std::fprintf(stderr," output%u=%.3f",part,interval(s.events[6],s.output_ready[part]));
+    std::fprintf(stderr,"\n");
 #endif
     return output;
     } catch(...) {
