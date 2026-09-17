@@ -30,5 +30,19 @@ int main() {
     for(size_t words:{0,1,2,7,63,127,4097,65537,917504}) {
         exercise<1>(pool,words);exercise<2>(pool,words);exercise<4>(pool,words);exercise<8>(pool,words);
     }
+    struct Injected {};
+    for(unsigned failed=0;failed<4;++failed) {
+        size_t words=65537;std::vector<uint32_t> a(words,17),b(words,23),pinned(2*words);
+        unsigned seen=0;bool caught=false;
+        try {
+            copy_input_pipeline<4>(pool,pinned.data(),a.data(),b.data(),words,
+                [&](size_t,const uint32_t*,const uint32_t*,size_t) {if(seen++==failed) throw Injected{};});
+        } catch(const Injected&) {caught=true;}
+        if(!caught) throw std::runtime_error("expected injected transfer failure");
+        // Reusing the pool immediately checks that any in-flight packing job
+        // was joined before the transfer exception escaped.
+        exercise<4>(pool,words);
+    }
     std::puts("Input pipeline: 36 immediate/deferred transfer and ownership cases passed");
+    std::puts("Input pipeline: 4 transfer exceptions drained outstanding packing jobs");
 }

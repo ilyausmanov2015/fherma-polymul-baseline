@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cassert>
 #ifdef __linux__
 #include <sched.h>
 #include <fstream>
@@ -48,6 +49,8 @@ class HostCopyPool {
     std::array<std::thread,Threads-1> workers_;
     unsigned generation_=0,pending_=0;
     bool stop_=false;
+    bool in_flight_=false;
+    unsigned active_generation_=0;
 #if FHERMA_SPIN_COPY
     alignas(64) std::atomic<unsigned> spin_generation_{0};
     alignas(64) std::atomic<unsigned> spin_pending_{0};
@@ -129,28 +132,38 @@ class HostCopyPool {
 #endif
         for(auto& thread:workers_) if(thread.joinable()) thread.join();
     }
-    void run(Job job) {
+    void begin(Job job) {
+        assert(!in_flight_);in_flight_=true;
 #if FHERMA_SPIN_COPY
         job_=job;
 #if FHERMA_COPY_ACKS
-        unsigned generation=spin_generation_.fetch_add(1,std::memory_order_release)+1;
-        part(job,Threads-1);
-        for(auto& worker:completed_)
-            while(worker.generation.load(std::memory_order_acquire)!=generation) pause();
+        active_generation_=spin_generation_.fetch_add(1,std::memory_order_release)+1;
 #else
         spin_pending_.store(Threads-1,std::memory_order_relaxed);
         spin_generation_.fetch_add(1,std::memory_order_release);
-        part(job,Threads-1);
-        while(spin_pending_.load(std::memory_order_acquire)) pause();
 #endif
+        part(job,Threads-1);
 #else
         { std::lock_guard<std::mutex> lock(mutex_); job_=job; pending_=Threads-1; ++generation_; }
         start_.notify_all(); part(job,Threads-1);
+#endif
+    }
+    void finish() {
+        assert(in_flight_);
+#if FHERMA_SPIN_COPY
+#if FHERMA_COPY_ACKS
+        for(auto& worker:completed_)
+            while(worker.generation.load(std::memory_order_acquire)!=active_generation_) pause();
+#else
+        while(spin_pending_.load(std::memory_order_acquire)) pause();
+#endif
+#else
         std::unique_lock<std::mutex> lock(mutex_);
         done_.wait(lock,[&] { return pending_==0; });
 #endif
-        job_={};
+        job_={};in_flight_=false;
     }
+    void run(Job job) { begin(job);finish(); }
 public:
     HostCopyPool() {
         std::array<int,Threads-1> worker_cpus; worker_cpus.fill(-1);
@@ -184,6 +197,10 @@ public:
     void inputs(void* out,const void* a,const void* b,size_t bytes) {
         run({static_cast<const char*>(a),static_cast<const char*>(b),static_cast<char*>(out),bytes});
     }
+    void begin_inputs(void* out,const void* a,const void* b,size_t bytes) {
+        begin({static_cast<const char*>(a),static_cast<const char*>(b),static_cast<char*>(out),bytes});
+    }
+    void finish_inputs() { finish(); }
     void prefault(void* storage,size_t bytes) {
         run({nullptr,nullptr,static_cast<char*>(storage),bytes,true});
     }
