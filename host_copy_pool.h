@@ -42,6 +42,9 @@
 #ifndef FHERMA_CACHED_VECTOR
 #define FHERMA_CACHED_VECTOR 0
 #endif
+#ifndef FHERMA_DEFER_MAIN_PIN
+#define FHERMA_DEFER_MAIN_PIN 0
+#endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
@@ -58,6 +61,7 @@ class HostCopyPool {
     bool in_flight_=false;
     bool deferred_caller_=false;
     unsigned active_generation_=0;
+    int caller_cpu_=-1;
 #if FHERMA_SPIN_COPY
     alignas(64) std::atomic<unsigned> spin_generation_{0};
     alignas(64) std::atomic<unsigned> spin_pending_{0};
@@ -188,8 +192,10 @@ public:
             unsigned found=0;
             for(int cpu=0;cpu<CPU_SETSIZE && found<Threads-1;++cpu)
                 if(cpu!=caller && CPU_ISSET(cpu,&allowed)) worker_cpus[found++]=cpu;
-            cpu_set_t current; CPU_ZERO(&current); CPU_SET(caller,&current);
-            sched_setaffinity(0,sizeof(current),&current);
+            caller_cpu_=caller;
+#if !FHERMA_DEFER_MAIN_PIN
+            pin_caller();
+#endif
         }
         std::string quota,period;
         std::ifstream("/sys/fs/cgroup/cpu.max")>>quota>>period;
@@ -205,6 +211,16 @@ public:
         catch(...) { stop(); throw; }
     }
     ~HostCopyPool() { stop(); }
+    // Defer this until CUDA initialization has created its helper threads.
+    // Workers are already individually pinned; the measured run is unchanged.
+    void pin_caller() {
+#ifdef __linux__
+        if(caller_cpu_>=0) {
+            cpu_set_t current; CPU_ZERO(&current); CPU_SET(caller_cpu_,&current);
+            sched_setaffinity(0,sizeof(current),&current);
+        }
+#endif
+    }
     void inputs(void* out,const void* a,const void* b,size_t bytes) {
         run({static_cast<const char*>(a),static_cast<const char*>(b),static_cast<char*>(out),bytes});
     }

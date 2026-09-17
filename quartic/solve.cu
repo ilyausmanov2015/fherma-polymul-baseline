@@ -1,5 +1,8 @@
 #ifndef FHERMA_HARVEY
-#define FHERMA_HARVEY 1
+#define FHERMA_HARVEY 0
+#endif
+#ifndef FHERMA_DEFER_MAIN_PIN
+#define FHERMA_DEFER_MAIN_PIN 1
 #endif
 #ifndef FHERMA_CACHED_VECTOR
 #define FHERMA_CACHED_VECTOR 0
@@ -999,7 +1002,10 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaGraphUpload(s->graph,s->stream),"upload RNS graph");
     check(cudaStreamSynchronize(s->stream),"RNS graph ready");
 #endif
-#if FHERMA_HOST_PROFILE
+#if FHERMA_DEFER_MAIN_PIN
+    s->copy.pin_caller();
+#endif
+#if FHERMA_HOST_PROFILE || FHERMA_DEFER_MAIN_PIN
     report_thread_affinity();
 #endif
     return s.release();
