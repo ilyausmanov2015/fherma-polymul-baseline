@@ -2,10 +2,10 @@
 #define FHERMA_CHUNK_GRAPHS 0
 #endif
 #ifndef FHERMA_LIBRARY_NTT
-#define FHERMA_LIBRARY_NTT 1
+#define FHERMA_LIBRARY_NTT 0
 #endif
 #ifndef FHERMA_TENSOR_PREPARE
-#define FHERMA_TENSOR_PREPARE 0
+#define FHERMA_TENSOR_PREPARE 1
 #endif
 #ifndef __CUDACC__
 // The CPU adapter cannot execute cuPQC's device-LTO NTT. It only validates
