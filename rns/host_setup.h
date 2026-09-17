@@ -4,7 +4,7 @@
 #include <limits>
 
 namespace rns {
-constexpr unsigned PrimeCount=57,WideWords=56,AbiWords=28,Tile=1024;
+constexpr unsigned PrimeCount=57,WideWords=56,AccumWords=32,AbiWords=28,Tile=1024;
 struct Twiddle { uint32_t value,shoup; };
 struct SmallMod { uint32_t p,base,base_shoup,padding=0; uint64_t reciprocal; };
 using Words=std::vector<uint32_t>;
@@ -55,7 +55,7 @@ inline Twiddle twiddle(uint32_t value,uint32_t p) {
 struct Setup {
     std::vector<SmallMod> mods;
     std::vector<Twiddle> forward,inverse,scale,small_forward,small_inverse;
-    Words product,half_ceil,product_mod_q,bases;
+    Words product,half_ceil,product_mod_q,bases,bases_mod_q;
 };
 inline Setup setup(unsigned n,const Words& q) {
     Setup s;
@@ -73,14 +73,15 @@ inline Setup setup(unsigned n,const Words& q) {
         candidate-=65536;
     }
     auto qm1=host_wide::sub(q,host_wide::small(q.size(),1));
-    auto bound=multiply(qm1,qm1); mul_small(bound,2*n);
-    if(host_wide::cmp(s.product,bound)<=0) throw std::runtime_error("CRT range too small");
+    auto bound=multiply(qm1,qm1); mul_small(bound,4*n);
+    if(host_wide::cmp(s.product,bound)<=0) throw std::runtime_error("CRT range too small for exact nearest-integer correction");
     auto sum_bound=s.product; mul_small(sum_bound,PrimeCount);
     s.half_ceil=host_wide::divide_small(s.product,2);
     uint64_t carry=1;
     for(auto& word:s.half_ceil) { uint64_t x=uint64_t(word)+carry;word=uint32_t(x);carry=x>>32; }
     s.product_mod_q=mod_wide(s.product,q);
     s.bases.reserve(PrimeCount*WideWords);
+    s.bases_mod_q.reserve(PrimeCount*AccumWords);
     s.forward.resize(size_t(PrimeCount)*n);s.inverse.resize(size_t(PrimeCount)*n);
     s.scale.resize(size_t(PrimeCount)*n);
     if(n>=Tile) {s.small_forward.resize(PrimeCount*Tile);s.small_inverse.resize(PrimeCount*Tile);}
@@ -89,6 +90,8 @@ inline Setup setup(unsigned n,const Words& q) {
         auto basis=host_wide::divide_small(s.product,p,&remainder);
         if(remainder) throw std::runtime_error("CRT basis division not exact");
         s.bases.insert(s.bases.end(),basis.begin(),basis.end());
+        auto reduced_basis=mod_wide(basis,q);reduced_basis.resize(AccumWords,0);
+        s.bases_mod_q.insert(s.bases_mod_q.end(),reduced_basis.begin(),reduced_basis.end());
         uint32_t basis_inverse=pow_mod(mod_small(basis,p),p-2,p);
         uint32_t psi=0;
         for(uint32_t g=2;g<10000;++g) {

@@ -18,7 +18,7 @@ while len(primes)<57:
 P=1
 for p in primes: P*=p
 bound=N*(Q-1)**2
-assert P>2*bound and (57*P).bit_length()<=1792
+assert P>4*bound and (57*P).bit_length()<=1792
 assert min(primes)>(1<<32)//3
 bases=[P//p for p in primes]
 inverses=[pow(m,-1,p) for m,p in zip(bases,primes)]
@@ -49,6 +49,7 @@ def fold_q(value,c):
     return out-q if out>=q else out
 
 crt_cases=0
+compact_cases=0
 edges=[0,1,-1,Q-1,Q,Q+1,-Q,-Q-1,bound,-bound,P//2,-(P//2)]
 for value in edges+[rng.randrange(-bound,bound+1) for _ in range(10000)]:
     t=[(value%p)*inv%p for p,inv in zip(primes,inverses)]
@@ -62,6 +63,14 @@ for value in edges+[rng.randrange(-bound,bound+1) for _ in range(10000)]:
     if canonical>P//2: reduced=(reduced-P%Q)%Q
     assert reduced==value%Q
     crt_cases+=1
+    if abs(value)<=bound:
+        fixed=sum(ti*recip for ti,recip in zip(t,reciprocals))
+        nearest=(fixed+(1<<63))>>64
+        assert S-nearest*P==value
+        compact=sum(ti*(m%Q) for ti,m in zip(t,bases))
+        assert compact.bit_length()<=905
+        assert (compact-nearest*(P%Q))%Q==value%Q
+        compact_cases+=1
 shoup_cases=0
 for p in primes:
     for _ in range(2000):
@@ -82,6 +91,6 @@ for c in [1,C,(1<<28)-1]:
 report={'kind':'rns-mathematical-prototype','prime_count':len(primes),'prime_min':min(primes),
         'prime_max':max(primes),'product_bits':P.bit_length(),'required_bound_bits':(2*bound).bit_length(),
         'sum_bits_bound':(57*P).bit_length(),'crt_cases':crt_cases,'shoup_cases':shoup_cases,
-        'fold_cases':fold_cases,'passed':True}
+        'compact_cases':compact_cases,'fold_cases':fold_cases,'passed':True}
 Path(__file__).resolve().parents[1].joinpath('results/rns-arithmetic.json').write_text(json.dumps(report,indent=2)+'\n')
 print(json.dumps(report,indent=2))

@@ -8,6 +8,7 @@
   "sum_bits_bound": 1772,
   "crt_cases": 10012,
   "shoup_cases": 114000,
+  "compact_cases": 10010,
   "fold_cases": 6018,
   "passed": true
 }

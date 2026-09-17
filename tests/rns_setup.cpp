@@ -8,12 +8,14 @@ int main() {
     rns::Words q(28,0xffffffffu);q[0]=uint32_t(0)-11993087;q[27]=15;
     auto s=rns::setup(32768,q);
     auto Q=integer(q),P=integer(s.product);
-    if(!(P>2*32768*(Q-1)*(Q-1)) || integer(s.product_mod_q)!=P%Q || integer(s.half_ceil)!=(P+1)/2) return 1;
+    if(!(P>4*32768*(Q-1)*(Q-1)) || integer(s.product_mod_q)!=P%Q || integer(s.half_ceil)!=(P+1)/2) return 1;
     for(unsigned i=0;i<rns::PrimeCount;++i) {
         auto p=s.mods[i].p;
         if(!mpz_probab_prime_p(mpz_class(p).get_mpz_t(),30)) return 2;
         rns::Words basis(s.bases.begin()+i*56,s.bases.begin()+(i+1)*56);
         if(integer(basis)*p!=P) return 3;
+        rns::Words reduced(s.bases_mod_q.begin()+i*32,s.bases_mod_q.begin()+(i+1)*32);
+        if(integer(reduced)!=integer(basis)%Q) return 6;
         mpz_class B=mpz_class(1)<<64,recip=B/p;
         if(recip.get_ui()!=s.mods[i].reciprocal) return 4;
         for(unsigned j:{0u,1u,127u,16384u,32767u}) {
