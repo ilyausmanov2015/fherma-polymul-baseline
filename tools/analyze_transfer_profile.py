@@ -28,6 +28,16 @@ def analyze(payload, warmups=2):
     gpu = defaultdict(list)
     for row in records['GPU_SEGMENT']:
         gpu[row['run']].append(row)
+    # FHERMA may retain only the last 12,000 characters of build_log. Reject
+    # partial calls rather than silently treating missing stages as zero.
+    def complete(rows):
+        parts = defaultdict(set)
+        for row in rows:
+            parts[row['kind']].add(row['part'])
+        return (parts['prepare'] == set(range(4)) and parts['d2h'] == set(range(8))
+                and all(parts[k] == {0} for k in ('forward', 'product', 'inverse', 'crt'))
+                and (not parts['h2d'] or parts['h2d'] == set(range(4))))
+    gpu = {call: rows for call, rows in gpu.items() if complete(rows)}
     for rows in gpu.values():
         stages = defaultdict(list)
         for row in rows:
@@ -44,10 +54,15 @@ def analyze(payload, warmups=2):
             overlap = sum(max(0, min(a['end_us'], b['end_us']) - max(a['start_us'], b['start_us']))
                           for a in stages['h2d'] for b in stages['prepare'])
             metrics['gpu_upload_prepare_overlap_us'].append(overlap)
+        input_rows = stages['prepare'] + stages['h2d']
+        metrics['gpu_input_span_us'].append(max(p['end_us'] for p in input_rows) - min(p['start_us'] for p in input_rows))
+        metrics['gpu_ntt_crt_sum_us'].append(sum(p['end_us'] - p['start_us']
+            for kind in ('forward', 'product', 'inverse', 'crt') for p in stages[kind]))
         metrics['gpu_full_span_us'].append(max(p['end_us'] for p in rows) - min(p['start_us'] for p in rows))
     cpu = defaultdict(list)
     for row in records['CPU_SEGMENT']:
-        cpu[(row['run'], row['kind'])].append(row)
+        if row['run'] in gpu:
+            cpu[(row['run'], row['kind'])].append(row)
     for (_, kind), rows in cpu.items():
         rows.sort(key=lambda p: p['part'])
         if kind == 'input':
@@ -60,8 +75,9 @@ def analyze(payload, warmups=2):
             metrics['cpu_result_complete_us'].append(rows[-1]['copied_us'])
     probes = defaultdict(lambda: defaultdict(list))
     for row in records['DMA_PROBE']:
-        key = tuple(row[k] for k in ('kind', 'parts', 'cached', 'flags', 'consume'))
-        probes[key][row['run']].append(row)
+        if row['run'] in gpu:
+            key = tuple(row[k] for k in ('kind', 'parts', 'cached', 'flags', 'consume'))
+            probes[key][row['run']].append(row)
     summaries = []
     for key, cases in sorted(probes.items()):
         gpu_us = median(median(p['gpu_us'] for p in case) for case in cases.values())
@@ -71,6 +87,7 @@ def analyze(payload, warmups=2):
                          {'bytes': size, 'gpu_us': gpu_us, 'host_us': host_us,
                           'effective_GB_s': size / gpu_us / 1000})
     return {'run_id': run.get('id'), 'measured_calls': len(gpu),
+            'included_call_ids': sorted(gpu), 'log_characters': len(run.get('build_log', '')),
             'median_us': {k: round(median(v), 3) for k, v in sorted(metrics.items())},
             'dma_probes': summaries, 'records': records}
 
