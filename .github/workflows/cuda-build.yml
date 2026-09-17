@@ -61,6 +61,12 @@ jobs:
             g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=4 -DFHERMA_OUTPUT_THREADS=2 -DFHERMA_SPIN_COPY=$mode -DFHERMA_COPY_ACKS=1 -DFHERMA_MAIN_OUTPUT=1 -DFHERMA_ASYNC_INPUT=1 -DFHERMA_INPUT_WORKERS_ONLY=1 tests/input_pipeline.cpp -o /tmp/input-workers-check
             /tmp/input-workers-check
           done
+      - name: Check selective output wakeups
+        run: |
+          for full in 0 1; do
+            g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=4 -DFHERMA_OUTPUT_THREADS=2 -DFHERMA_SPIN_COPY=1 -DFHERMA_COPY_ACKS=1 -DFHERMA_MAIN_OUTPUT=1 -DFHERMA_ASYNC_INPUT=1 -DFHERMA_INPUT_WORKERS_ONLY=$full -DFHERMA_SELECTIVE_OUTPUT_WAKE=1 tests/input_pipeline.cpp -o /tmp/selective-output-check
+            /tmp/selective-output-check
+          done
       - name: Install NVIDIA cuPQC 0.6.0
         run: |
           curl -fsSL --retry 2 https://developer.nvidia.com/downloads/compute/cupqc/downloads/secure/cupqc-sdk-0.6.0-x86_64.tar.gz -o /tmp/cupqc.tar.gz

@@ -1,5 +1,8 @@
+#ifndef FHERMA_SELECTIVE_OUTPUT_WAKE
+#define FHERMA_SELECTIVE_OUTPUT_WAKE 1
+#endif
 #ifndef FHERMA_INPUT_WORKERS_ONLY
-#define FHERMA_INPUT_WORKERS_ONLY 1
+#define FHERMA_INPUT_WORKERS_ONLY 0
 #endif
 #ifndef FHERMA_ASYNC_OUTPUT_ALLOC
 #define FHERMA_ASYNC_OUTPUT_ALLOC 0
@@ -35,7 +38,7 @@
 #define FHERMA_DEFER_INPUT_CALLER 1
 #endif
 #ifndef FHERMA_ASYNC_INPUT
-#define FHERMA_ASYNC_INPUT 1
+#define FHERMA_ASYNC_INPUT 0
 #endif
 #ifndef FHERMA_OUTPUT_SPARE
 #define FHERMA_OUTPUT_SPARE 0
@@ -1130,7 +1133,7 @@ void* fherma_init(const fherma::Point& p) {
 }
 fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     auto& s=*static_cast<State*>(opaque);
-    size_t words=size_t(s.n)*quartic::AbiWords,bytes=words*4;
+    [[maybe_unused]] size_t words=size_t(s.n)*quartic::AbiWords,bytes=words*4;
     if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
     fherma::Outputs output;output.c.shape={s.n,quartic::AbiWords};
 #if FHERMA_ASYNC_OUTPUT_ALLOC
