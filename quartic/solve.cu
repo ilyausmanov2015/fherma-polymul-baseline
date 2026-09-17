@@ -1,3 +1,6 @@
+#ifndef FHERMA_DIF_FORWARD
+#define FHERMA_DIF_FORWARD 1
+#endif
 #ifndef FHERMA_COPY_ACKS
 #define FHERMA_COPY_ACKS 1
 #endif
@@ -191,7 +194,8 @@ template<bool Product> __device__ inline uint32_t small_value(
     if constexpr(!Product) return values[local];
     else {
         unsigned frequency=__brev(begin+local)>>(32-logn);
-        unsigned index=FHERMA_RNS_TAIL && n==32768 ? (frequency%Tile)*TailRows+frequency/Tile : frequency;
+        unsigned index=FHERMA_DIF_FORWARD && n==32768 ? begin+local :
+            (FHERMA_RNS_TAIL && n==32768 ? (frequency%Tile)*TailRows+frequency/Tile : frequency);
         return multiply_mod(paired[channel*n+index],paired[(PrimeCount+channel)*n+index],modulus);
     }
 }
@@ -278,6 +282,79 @@ template<bool Product> __global__ void small_rns(uint32_t* values,const SmallMod
     values[t]=tile[small_index(t)];values[t+Tile/2]=tile[small_index(t+Tile/2)];
 #endif
 }
+// DIF forward accepts natural-order input and leaves bit-reversed frequencies.
+// The inverse DIT consumes this order directly, including the pointwise product.
+__global__ void small_dif_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
+    static_assert(!FHERMA_DIF_FORWARD || (Tile==1024 && FHERMA_RNS_TAIL),"DIF requires 1024-element tiles and the tail path");
+    __shared__ uint32_t tile[Tile];
+    unsigned t=threadIdx.x,pi=blockIdx.y%ModCount;
+    values+=blockIdx.y*n+blockIdx.x*Tile;tables+=pi*Tile;
+    uint32_t p=mods[pi].p;
+    #pragma unroll
+    for(unsigned k=0;k<8;++k) tile[small_index(t+k*Tile/8)]=values[t+k*Tile/8];
+    __syncthreads();
+    for(unsigned half=Tile/8;half;half/=8) {
+        unsigned j=t&(half-1),i=8*(t-j)+j;uint32_t x[8];
+        #pragma unroll
+        for(unsigned k=0;k<8;++k) x[k]=tile[small_index(i+k*half)];
+        #pragma unroll
+        for(unsigned step=4;step;step/=2) {
+            #pragma unroll
+            for(unsigned lane=0;lane<step;++lane) {
+                unsigned exponent=(j+lane*half)*(Tile/(step*half));
+                Twiddle w=tables[exponent];
+                #pragma unroll
+                for(unsigned k=lane;k<8;k+=2*step) {
+                    uint32_t u=x[k],v=x[k+step];
+                    x[k]=add_mod(u,v,p);x[k+step]=sub_mod(u,v,p);
+                    if(exponent) x[k+step]=shoup(x[k+step],w,p);
+                }
+            }
+        }
+        #pragma unroll
+        for(unsigned k=0;k<8;++k) tile[small_index(i+k*half)]=x[k];
+        __syncthreads();
+    }
+    #pragma unroll
+    for(unsigned k=0;k<4;++k) {
+        unsigned i=2*(t+k*Tile/8);
+        uint32_t u=tile[small_index(i)],v=tile[small_index(i+1)];
+        values[i]=add_mod(u,v,p);values[i+1]=sub_mod(u,v,p);
+    }
+}
+// The five large DIF stages operate on a column of the [32][1024] layout.
+// Restore this layout before the contiguous small DIF tiles, using two shared
+// transposes and register shuffles between butterflies.
+__global__ void tail_dif_rns(const uint32_t* source,uint32_t* destination,const SmallMod* mods,
+                             const Twiddle* tables,unsigned n) {
+    __shared__ uint32_t tile[TailColumns*(TailRows+1)];
+    unsigned t=threadIdx.x,pi=blockIdx.y%ModCount,column_base=blockIdx.x*TailColumns;
+    source+=blockIdx.y*n;destination+=blockIdx.y*n;tables+=pi*n;
+    #pragma unroll
+    for(unsigned index=t;index<256;index+=128) {
+        unsigned row=index/TailColumns,column=index%TailColumns;
+        tile[column*(TailRows+1)+row]=source[row*Tile+column_base+column];
+    }
+    __syncthreads();
+    unsigned column=column_base+t/(TailRows/2),k=t%(TailRows/2),offset=(t/(TailRows/2))*(TailRows+1);
+    uint32_t p=mods[pi].p,u=tile[offset+k],v=tile[offset+k+TailRows/2];
+    uint32_t lower=add_mod(u,v,p),upper=shoup(sub_mod(u,v,p),tables[Tile*(TailRows/2-1)+column*(TailRows/2)+k],p);
+    #pragma unroll
+    for(unsigned half=TailRows/4;half;half/=2) {
+        uint32_t peer_lower=__shfl_xor_sync(0xffffffff,lower,half,TailRows/2);
+        uint32_t peer_upper=__shfl_xor_sync(0xffffffff,upper,half,TailRows/2);
+        u=(k&half) ? peer_upper : lower;v=(k&half) ? upper : peer_lower;
+        unsigned j=k&(half-1);
+        lower=add_mod(u,v,p);upper=shoup(sub_mod(u,v,p),tables[Tile*(half-1)+column*half+j],p);
+    }
+    tile[offset+2*k]=lower;tile[offset+2*k+1]=upper;
+    __syncthreads();
+    #pragma unroll
+    for(unsigned index=t;index<256;index+=128) {
+        unsigned row=index/TailColumns,column=index%TailColumns;
+        destination[row*Tile+column_base+column]=tile[column*(TailRows+1)+row];
+    }
+}
 __global__ void stage_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,
                            unsigned n,unsigned half,unsigned stride) {
     unsigned k=blockIdx.x*blockDim.x+threadIdx.x;
@@ -362,7 +439,8 @@ __global__ void product_rns(const uint32_t* ab,uint32_t* c,const SmallMod* mods,
     if(i>=n) return;
     unsigned prime_i=blockIdx.y;
     uint32_t a=ab[prime_i*n+i],b=ab[(PrimeCount+prime_i)*n+i];
-    c[prime_i*n+(__brev(natural_index(i,n))>>(32-logn))]=multiply_mod(a,b,mods[prime_i%ModCount]);
+    unsigned index=FHERMA_DIF_FORWARD && n==32768 ? i : (__brev(natural_index(i,n))>>(32-logn));
+    c[prime_i*n+index]=multiply_mod(a,b,mods[prime_i%ModCount]);
 }
 // Extract a word of the exact 512-bit magnitude shifted by 217*j.
 __device__ uint32_t shifted_word(const Wide& value,unsigned word,unsigned shift) {
@@ -517,24 +595,34 @@ void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stre
 }
 void launch_rns(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
+    bool dif_forward=FHERMA_DIF_FORWARD && s.n==32768;
     uint32_t* prepared=s.ab;
     if(s.overlap_input) {
+      if(!dif_forward) {
         dim3 permutation(32,2*PrimeCount);
         reverse_rns<<<permutation,256,0,stream>>>(s.ab,s.scratch,s.n);
         prepared=s.scratch;
+      }
     } else {
         dim3 abi_tiles((s.n+31)/32,2),residues((s.n+127)/128,2*ModCount);
         transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n);
-        prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn);
+        prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
     }
     mark(s,2,stream);
     unsigned first=1;
+    uint32_t* forward_values=prepared;
+    if(dif_forward) {
+        dim3 tails(128,2*PrimeCount),tiles(s.n/Tile,2*PrimeCount);
+        tail_dif_rns<<<tails,128,0,stream>>>(prepared,s.scratch,s.mods,s.tail_forward,s.n);
+        small_dif_rns<<<tiles,Tile/8,0,stream>>>(s.scratch,s.mods,s.small_forward,s.n);
+        forward_values=s.scratch;
+        first=Tile;
+    } else {
     if(s.n>=Tile) {
         dim3 tiles(s.n/Tile,2*PrimeCount);
         small_rns<false><<<tiles,Tile/(FHERMA_RNS_RADIX8?8:(FHERMA_RNS_RADIX4?4:2)),0,stream>>>(prepared,s.mods,s.small_forward,s.n);
         first=Tile;
     }
-    uint32_t* forward_values=prepared;
     if(FHERMA_RNS_TAIL && s.n==32768) {
         dim3 transposes(Tile/32,2*PrimeCount),tails(128,2*PrimeCount);
         uint32_t* transposed=s.overlap_input ? s.ab : s.scratch;
@@ -547,6 +635,7 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
         forward_values=transposed;
     } else for(unsigned h=first;h<s.n;h*=2)
         stage_rns<<<half,128,0,stream>>>(s.ab,s.mods,s.forward,s.n,h,s.n/h);
+    }
     mark(s,3,stream);
     dim3 inverse_full(full.x,PrimeCount),inverse_half(half.x,PrimeCount);
     bool fused_product=FHERMA_FUSED_PRODUCT && s.n>=Tile;
