@@ -7,11 +7,32 @@
 #ifndef FHERMA_MONTGOMERY
 #define FHERMA_MONTGOMERY 0
 #endif
+#ifndef FHERMA_SOA
+#define FHERMA_SOA 1
+#endif
 
 namespace {
 constexpr unsigned L=28;
 using BI=decltype(cupqc::BitWidth<L*32>()+cupqc::SM<800>()+cupqc::Thread());
 using Big=typename BI::bigint;
+__device__ Big load_coeff(const uint32_t* p,unsigned i,unsigned n) {
+#if FHERMA_SOA
+    Big x(uint32_t(0));
+    #pragma unroll
+    for(unsigned k=0;k<L;++k) x[k]=p[k*n+i];
+    return x;
+#else
+    return Big(p,i);
+#endif
+}
+__device__ void store_coeff(const Big& x,uint32_t* p,unsigned i,unsigned n) {
+#if FHERMA_SOA
+    #pragma unroll
+    for(unsigned k=0;k<L;++k) p[k*n+i]=x[k];
+#else
+    x.store(p,i);
+#endif
+}
 #if FHERMA_MONTGOMERY
 using Mod=typename BI::modulus;
 __device__ Big encode(const Big& x,const Mod& q) { return x.to_montgomery(q); }
@@ -71,7 +92,8 @@ __global__ void make_tables(const uint32_t* qp,const uint32_t* roots,
     const Mod q(qp,0);
     const Big psi=encode(Big(roots,0),q), invpsi=encode(Big(roots,1),q), invn=encode(Big(roots,2),q);
     auto a=pow_small(psi,i,q), b=pow_small(invpsi,i,q);
-    a.store(twist,i); b.store(inv_twist,i); multiply(b,invn,q).store(scale,i);
+    store_coeff(a,twist,i,n); store_coeff(b,inv_twist,i,n);
+    store_coeff(multiply(b,invn,q),scale,i,n);
 }
 __global__ void prepare(const uint32_t* input,uint32_t* ab,const uint32_t* twist,
                         const uint32_t* qp,unsigned n,unsigned logn) {
@@ -79,33 +101,34 @@ __global__ void prepare(const uint32_t* input,uint32_t* ab,const uint32_t* twist
     if(i>=n) return;
     unsigned poly=blockIdx.y, j=__brev(i)>>(32-logn);
     const Mod q(qp,0);
-    const Big x=encode(Big(input,poly*n+i),q), t(twist,i);
-    multiply(x,t,q).store(ab,poly*n+j);
+    const Big x=encode(Big(input,poly*n+i),q), t=load_coeff(twist,i,n);
+    store_coeff(multiply(x,t,q),ab+poly*n*L,j,n);
 }
 __global__ void stage(uint32_t* values,const uint32_t* table,const uint32_t* qp,
                       unsigned n,unsigned half) {
     unsigned k=blockIdx.x*blockDim.x+threadIdx.x;
     if(k>=n/2) return;
-    unsigned j=k&(half-1), i=2*(k-j)+j+blockIdx.y*n;
+    unsigned j=k&(half-1), i=2*(k-j)+j;
+    values+=blockIdx.y*n*L;
     const Mod q(qp,0);
-    const Big u(values,i), v(values,i+half), tw(table,j*(n/half));
+    const Big u=load_coeff(values,i,n), v=load_coeff(values,i+half,n), tw=load_coeff(table,j*(n/half),n);
     auto t=multiply(v,tw,q);
-    u.add_mod(t,q).store(values,i); u.sub_mod(t,q).store(values,i+half);
+    store_coeff(u.add_mod(t,q),values,i,n); store_coeff(u.sub_mod(t,q),values,i+half,n);
 }
 __global__ void product(const uint32_t* ab,uint32_t* c,const uint32_t* qp,
                         unsigned n,unsigned logn) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     const Mod q(qp,0);
-    const Big a(ab,i), b(ab,n+i);
-    multiply(a,b,q).store(c,__brev(i)>>(32-logn));
+    const Big a=load_coeff(ab,i,n), b=load_coeff(ab+n*L,i,n);
+    store_coeff(multiply(a,b,q),c,__brev(i)>>(32-logn),n);
 }
-__global__ void finish(uint32_t* c,const uint32_t* scale,const uint32_t* qp,unsigned n) {
+__global__ void finish(const uint32_t* c,uint32_t* out,const uint32_t* scale,const uint32_t* qp,unsigned n) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     const Mod q(qp,0);
-    const Big x(c,i), s(scale,i);
-    decode(multiply(x,s,q),q).store(c,i);
+    const Big x=load_coeff(c,i,n), s=load_coeff(scale,i,n);
+    decode(multiply(x,s,q),q).store(out,i);
 }
 } // namespace
 
@@ -142,10 +165,10 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     for(unsigned half=1;half<s.n;half*=2) stage<<<halves,128>>>(s.ab,s.twist,s.q,s.n,half);
     product<<<full.x,128>>>(s.ab,s.c,s.q,s.n,s.logn);
     for(unsigned half=1;half<s.n;half*=2) stage<<<halves.x,128>>>(s.c,s.inv_twist,s.q,s.n,half);
-    finish<<<full.x,128>>>(s.c,s.scale,s.q,s.n);
+    finish<<<full.x,128>>>(s.c,s.input,s.scale,s.q,s.n);
     check(cudaGetLastError(),"NTT launch");
     fherma::Outputs out; out.c.shape={s.n,L}; out.c.data.resize(words);
-    check(cudaMemcpy(out.c.data.data(),s.c,bytes,cudaMemcpyDeviceToHost),"copy output / synchronize");
+    check(cudaMemcpy(out.c.data.data(),s.input,bytes,cudaMemcpyDeviceToHost),"copy output / synchronize");
     return out;
 }
 void fherma_free(void* state) { delete static_cast<State*>(state); }
