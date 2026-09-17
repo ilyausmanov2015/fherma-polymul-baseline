@@ -61,6 +61,9 @@
 #ifndef FHERMA_PHYSICAL_CORES
 #define FHERMA_PHYSICAL_CORES 0
 #endif
+#ifndef FHERMA_INTERLEAVED_INPUT
+#define FHERMA_INTERLEAVED_INPUT 0
+#endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
@@ -131,10 +134,11 @@ class HostCopyPool {
             size_t begin=job.bytes*rank/OutputThreads,end=job.bytes*(rank+1)/OutputThreads;
             for(size_t i=begin;i<end;i+=4096) job.out[i]=0;
         } else if(job.b) {
-            unsigned half=rank%(Threads/2);
+            unsigned half=FHERMA_INTERLEAVED_INPUT ? rank/2 : rank%(Threads/2);
             size_t begin=job.bytes*half/(Threads/2),end=job.bytes*(half+1)/(Threads/2);
-            const char* source=rank<Threads/2 ? job.a : job.b;
-            char* dest=job.out+(rank<Threads/2 ? 0 : job.bytes);
+            bool first=FHERMA_INTERLEAVED_INPUT ? !(rank&1) : rank<Threads/2;
+            const char* source=first ? job.a : job.b;
+            char* dest=job.out+(first ? 0 : job.bytes);
             host_copy_bytes(dest+begin,source+begin,end-begin);
 #if FHERMA_INPUT_WC && defined(__x86_64__) && defined(__GNUC__)
             // Also order short memcpy tails written to WC staging pages.
@@ -334,7 +338,9 @@ public:
                 std::ifstream(path+"core_id")>>record.core;
                 topology.push_back(record);
             }
-            for(int cpu:host_worker_cpu_order(topology,caller)) {
+            constexpr unsigned dense_prefix=FHERMA_PHYSICAL_CORES==2 ?
+                (FHERMA_MAIN_OUTPUT && OutputThreads<Threads ? OutputThreads-1 : OutputThreads) : 0;
+            for(int cpu:host_worker_cpu_order(topology,caller,dense_prefix)) {
                 if(found==Workers) break;
                 worker_cpus[found++]=cpu;
             }

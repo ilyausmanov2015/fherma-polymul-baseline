@@ -12,10 +12,14 @@ inline bool same_host_core(const HostCpuCore& a,const HostCpuCore& b) {
 // Only reorder the supplied allowed CPUs. Prefer one thread per physical core,
 // fill other cores' SMT siblings next, and use caller siblings only as a last
 // resort. Missing topology treats each logical CPU as a separate core.
-inline std::vector<int> host_worker_cpu_order(const std::vector<HostCpuCore>& allowed,int caller) {
+inline std::vector<int> host_worker_cpu_order(const std::vector<HostCpuCore>& allowed,int caller,unsigned dense_prefix=0) {
     HostCpuCore main{caller,-1,-1};
     for(const auto& cpu:allowed) if(cpu.cpu==caller) main=cpu;
     std::vector<HostCpuCore> selected;
+    // Preserve the existing output-team placement before spreading workers
+    // which only participate in input copies.
+    for(const auto& cpu:allowed)
+        if(cpu.cpu!=caller && selected.size()<dense_prefix) selected.push_back(cpu);
     auto used=[&](int cpu) {
         return std::any_of(selected.begin(),selected.end(),[&](const auto& x) {return x.cpu==cpu;});
     };
