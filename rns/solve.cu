@@ -120,16 +120,15 @@ __global__ void tail_rns(uint32_t* values,const SmallMod* mods,const Twiddle* ta
     }
     values[t]=tile[t];values[t+128]=tile[t+128];
 }
-__device__ unsigned frequency_index(unsigned i,unsigned n) {
-    return FHERMA_RNS_TAIL && n==32768 ? ((i&1023)*32+(i>>10)) : i;
+__device__ unsigned natural_index(unsigned i,unsigned n) {
+    return FHERMA_RNS_TAIL && n==32768 ? ((i&31)*1024+(i>>5)) : i;
 }
 __global__ void product_rns(const uint32_t* ab,uint32_t* c,const SmallMod* mods,unsigned n,unsigned logn) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     unsigned prime_i=blockIdx.y;
-    unsigned source=frequency_index(i,n);
-    uint32_t a=ab[prime_i*n+source],b=ab[(PrimeCount+prime_i)*n+source];
-    c[prime_i*n+(__brev(i)>>(32-logn))]=multiply_mod(a,b,mods[prime_i]);
+    uint32_t a=ab[prime_i*n+i],b=ab[(PrimeCount+prime_i)*n+i];
+    c[prime_i*n+(__brev(natural_index(i,n))>>(32-logn))]=multiply_mod(a,b,mods[prime_i]);
 }
 // Sum(t_i * (M_i mod q)) is below 57*2^31*q (< 2^905).
 // Fold the supported 1024-bit cuPQC accumulator back to the 868-bit ABI.
@@ -167,7 +166,7 @@ __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const 
     for(unsigned prime_i=0;prime_i<PrimeCount;++prime_i) {
         SmallMod modulus=mods[prime_i];
         // The scale already contains inverse(P/pi mod pi).
-        uint32_t t=shoup(residues[prime_i*n+frequency_index(i,n)],scales[prime_i*n+i],modulus.p);
+        uint32_t t=shoup(residues[prime_i*n+i],scales[prime_i*n+i],modulus.p);
         uint64_t term=uint64_t(t)*modulus.reciprocal,next=fraction+term;
         alpha+=next<fraction;fraction=next;
         accumulator=accumulator+Wide(bases,prime_i).mul_scalar(t);
@@ -180,7 +179,7 @@ __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const 
     Big answer=fold_crt(accumulator,q);
     Big correction=fold_crt(Wide(product_mod_q,0).mul_scalar(nearest),q);
     answer=answer.sub_mod(correction,q);
-    answer.store(output,i);
+    answer.store(output,natural_index(i,n));
 }
 void check(cudaError_t status,const char* operation) {
     if(status!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(status));
@@ -280,6 +279,12 @@ void* fherma_init(const fherma::Point& p) {
     upload(s->mods,constants.mods);upload(s->bases,constants.bases_mod_q);
     constants.product_mod_q.resize(rns::AccumWords,0);
     upload(s->product_mod_q,constants.product_mod_q);upload(s->q,p.q.data);
+    if(FHERMA_RNS_TAIL && p.N==32768) {
+        auto original=constants.scale;
+        for(unsigned pi=0;pi<rns::PrimeCount;++pi)
+            for(unsigned i=0;i<p.N;++i)
+                constants.scale[pi*p.N+i]=original[pi*p.N+(i&31)*1024+(i>>5)];
+    }
     upload(s->forward,constants.forward);upload(s->inverse,constants.inverse);upload(s->scale,constants.scale);
     upload(s->small_forward,constants.small_forward);upload(s->small_inverse,constants.small_inverse);
     if(FHERMA_RNS_TAIL && p.N==32768) {
