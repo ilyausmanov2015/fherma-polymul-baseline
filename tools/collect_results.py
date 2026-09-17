@@ -15,6 +15,7 @@ for path in (ROOT/'local').glob('run-*.json'):
     row['image']=payload.get('submission',{}).get('image')
     row['runner']=run.get('runner',{}).get('name')
     row['points']=[{k:p.get(k) for k in ['point','passed','seeds','seconds']} for p in run.get('points',[])]
+    row['case_errors']=sorted({c['note'] for p in run.get('points',[]) for c in p.get('cases',[]) if c.get('note') and not c.get('passed')})
     row['profiles_us']=[{k:float(v) for k,v in re.findall(r'(\w+)=([0-9.]+)',line)}
         for line in str(run.get('build_log','')).splitlines() if 'PROFILE_US' in line]
     row['host_us']=[{k:float(v) for k,v in re.findall(r'(\w+)=([0-9.]+)',line)}

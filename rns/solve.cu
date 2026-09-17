@@ -11,7 +11,7 @@
 #define FHERMA_PROFILE 1
 #endif
 #ifndef FHERMA_GRAPH
-#define FHERMA_GRAPH (!FHERMA_PROFILE)
+#define FHERMA_GRAPH 1
 #endif
 #ifndef FHERMA_COPY_THREADS
 #define FHERMA_COPY_THREADS 8
@@ -265,12 +265,12 @@ struct State {
     cudaEvent_t events[8]{};
 #endif
     ~State() {
-#if FHERMA_PROFILE
-        for(auto event:events) if(event) cudaEventDestroy(event);
-#endif
 #if FHERMA_GRAPH
         if(graph) cudaGraphExecDestroy(graph);
         if(stream) cudaStreamDestroy(stream);
+#endif
+#if FHERMA_PROFILE
+        for(auto event:events) if(event) cudaEventDestroy(event);
 #endif
         cudaFree(input);cudaFree(input_soa);cudaFree(ab);cudaFree(c);cudaFree(bases);cudaFree(scratch);
         cudaFree(q);cudaFree(product_mod_q);cudaFree(mods);cudaFree(forward);cudaFree(inverse);
@@ -280,7 +280,13 @@ struct State {
 };
 void mark(State& s,unsigned i,cudaStream_t stream=nullptr) {
 #if FHERMA_PROFILE
+#if FHERMA_GRAPH
+    // Ordinary captured events represent dependencies without a timestamp.
+    // Explicit external nodes execute the event record on every replay.
+    check(cudaEventRecordWithFlags(s.events[i],stream,cudaEventRecordExternal),"RNS graph profile mark");
+#else
     check(cudaEventRecord(s.events[i],stream),"RNS profile mark");
+#endif
 #else
     (void)s;(void)i;(void)stream;
 #endif
@@ -347,7 +353,6 @@ void* fherma_init(const fherma::Point& p) {
     bool special=delta>0 && delta<0x10000000u && p.q.data[27]==15u;
     for(unsigned k=1;k<27;++k) special=special && p.q.data[k]==0xffffffffu;
     if(!special) throw std::runtime_error("RNS coverage: q=2^868-c, c<2^28");
-    static_assert(!FHERMA_PROFILE || !FHERMA_GRAPH,"Timing events must run outside graph capture");
     pin_near_gpu();
     auto s=std::make_unique<State>();s->n=p.N;s->logn=__builtin_ctz(p.N);
     auto constants=rns::setup(p.N,p.q.data);
@@ -451,10 +456,17 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_PROFILE
     auto unpack_end=std::chrono::steady_clock::now();
     const char* names[]={"h2d","prepare","forward","product","inverse","finish","d2h"};
-    std::fprintf(stderr,"PROFILE_US");
+    float elapsed[7]{};bool valid=true;
     for(unsigned k=0;k<7;++k) {
-        float ms=0;check(cudaEventElapsedTime(&ms,s.events[k],s.events[k+1]),"RNS profile time");
-        std::fprintf(stderr," %s=%.3f",names[k],1000*ms);
+        auto status=cudaEventElapsedTime(&elapsed[k],s.events[k],s.events[k+1]);
+        if(status!=cudaSuccess) {
+            std::fprintf(stderr,"PROFILE_ERROR stage=%s error=%s\n",names[k],cudaGetErrorString(status));
+            valid=false;break;
+        }
+    }
+    if(valid) {
+        std::fprintf(stderr,"PROFILE_US");
+        for(unsigned k=0;k<7;++k) std::fprintf(stderr," %s=%.3f",names[k],1000*elapsed[k]);
     }
     auto us=[](auto a,auto b) {return std::chrono::duration<double,std::micro>(b-a).count();};
     std::fprintf(stderr,"\nHOST_US pack=%.3f unpack=%.3f\n",us(pack_start,pack_end),us(unpack_start,unpack_end));
