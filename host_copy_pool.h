@@ -54,6 +54,9 @@
 #ifndef FHERMA_FLUSH_OUTPUT_SOURCE
 #define FHERMA_FLUSH_OUTPUT_SOURCE 0
 #endif
+#ifndef FHERMA_UMWAIT
+#define FHERMA_UMWAIT 0
+#endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
@@ -80,6 +83,16 @@ class HostCopyPool {
     bool deferred_caller_=false;
     unsigned active_generation_=0;
     int caller_cpu_=-1;
+#if FHERMA_UMWAIT && defined(__x86_64__) && defined(__GNUC__)
+    bool waitpkg_=false;
+    __attribute__((target("waitpkg"))) static void wait_for_generation(std::atomic<unsigned>& signal,unsigned seen) {
+        _umonitor(static_cast<void*>(&signal));
+        // Recheck after arming the monitor, so publication cannot be lost.
+        // A short deadline also bounds shutdown and CPUs whose firmware
+        // chooses to ignore monitoring. C0.1 prioritizes wakeup latency.
+        if(signal.load(std::memory_order_acquire)==seen) _umwait(1,__rdtsc()+5000);
+    }
+#endif
 #if FHERMA_SPIN_COPY
     alignas(64) std::atomic<unsigned> spin_generation_{0};
 #if FHERMA_SELECTIVE_OUTPUT_WAKE
@@ -170,6 +183,9 @@ class HostCopyPool {
     }
     void worker(unsigned rank) {
         unsigned seen=0;
+#if FHERMA_UMWAIT && defined(__x86_64__) && defined(__GNUC__) && !FHERMA_SELECTIVE_OUTPUT_WAKE
+        unsigned idle=0;
+#endif
 #if FHERMA_SPIN_COPY && FHERMA_SELECTIVE_OUTPUT_WAKE
         unsigned seen_output=0;
 #endif
@@ -185,7 +201,18 @@ class HostCopyPool {
             } else {pause();continue;}
             auto job=job_;
 #else
-            if(generation==seen) { pause(); continue; }
+            if(generation==seen) {
+#if FHERMA_UMWAIT && defined(__x86_64__) && defined(__GNUC__)
+                if(waitpkg_ && idle>=64) wait_for_generation(spin_generation_,seen);
+                else {++idle;pause();}
+#else
+                pause();
+#endif
+                continue;
+            }
+#if FHERMA_UMWAIT && defined(__x86_64__) && defined(__GNUC__)
+            idle=0;
+#endif
             auto job=job_; seen=generation;
 #endif
             if(!FHERMA_INPUT_WORKERS_ONLY || job.b || rank<Threads-1) part(job,rank);
@@ -268,6 +295,10 @@ class HostCopyPool {
     void run(Job job) { begin(job);finish(); }
 public:
     HostCopyPool() {
+#if FHERMA_UMWAIT && defined(__x86_64__) && defined(__GNUC__)
+        waitpkg_=bool(__builtin_cpu_supports("waitpkg"));
+        std::fprintf(stderr,"COPY_IDLE waitpkg=%d\n",waitpkg_);
+#endif
         std::array<int,Workers> worker_cpus; worker_cpus.fill(-1);
 #ifdef __linux__
         cpu_set_t allowed; int caller=sched_getcpu();
