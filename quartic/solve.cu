@@ -1,11 +1,11 @@
 #ifndef FHERMA_DIRECT_COPY
-#define FHERMA_DIRECT_COPY 1
+#define FHERMA_DIRECT_COPY 0
 #endif
 #ifndef FHERMA_ASYNC_OUTPUT_PREFAULT
 #define FHERMA_ASYNC_OUTPUT_PREFAULT 1
 #endif
 #ifndef FHERMA_OUTPUT_SIGNAL
-#define FHERMA_OUTPUT_SIGNAL 0
+#define FHERMA_OUTPUT_SIGNAL 1
 #endif
 #ifndef FHERMA_FLUSH_OUTPUT_SOURCE
 #define FHERMA_FLUSH_OUTPUT_SOURCE 0
@@ -38,7 +38,7 @@
 #define FHERMA_HARVEY 0
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 0
+#define FHERMA_OUTPUT_GRAPH 1
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -1118,8 +1118,8 @@ void* fherma_init(const fherma::Point& p) {
 #endif
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
-    static_assert(FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE,"completion flags require ordinary staged output");
-    s->completion.init(s->stream);
+    static_assert(FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_CRT_PIPELINE,"completion flags require staged output without CRT branching");
+    s->completion.init(s->stream,bool(FHERMA_OUTPUT_GRAPH));
 #endif
     if(s->overlap_input) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
@@ -1147,7 +1147,11 @@ void* fherma_init(const fherma::Point& p) {
         size_t words=bytes/4,begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
         check(cudaMemcpyAsync(s->host_output+begin,s->input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s->stream),"capture RNS output segment");
         // The event must remain a real record node visible to host waits.
-        check(cudaEventRecordWithFlags(s->output_ready[part],s->stream,cudaEventRecordExternal),"capture RNS output completion");
+#if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
+        if(s->completion.enabled()) s->completion.record(s->stream,part);
+        else
+#endif
+            check(cudaEventRecordWithFlags(s->output_ready[part],s->stream,cudaEventRecordExternal),"capture RNS output completion");
     }
 #endif
     mark(*s,7,s->stream);
@@ -1219,11 +1223,11 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #endif
     if(FHERMA_OUTPUT_SPARE) output.c.data.swap(s.spare_output);
 #if FHERMA_GRAPH
-        check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
-#if FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_OUTPUT_GRAPH
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
         s.completion.begin();
 #endif
+        check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
+#if FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_OUTPUT_GRAPH
         for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
             size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
             check(cudaMemcpyAsync(s.host_output+begin,s.input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s.stream),"RNS pipeline D2H");

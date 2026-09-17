@@ -13,7 +13,7 @@ template<unsigned Parts> class OutputCompletion {
     uint32_t* host_=nullptr;
     CUdeviceptr device_=0;
     uint32_t generation_=0;
-    bool supported_=false;
+    bool supported_=false,graph_=false;
     static void driver_check(CUresult status,const char* operation) {
         if(status==CUDA_SUCCESS) return;
         const char* description=nullptr;
@@ -27,7 +27,8 @@ public:
     OutputCompletion()=default;
     OutputCompletion(const OutputCompletion&)=delete;
     ~OutputCompletion() { if(host_) cudaFreeHost(host_); }
-    void init(cudaStream_t stream) {
+    void init(cudaStream_t stream,bool graph=false) {
+        graph_=graph;
         runtime_check(cudaHostAlloc(reinterpret_cast<void**>(&host_),Parts*64,cudaHostAllocMapped),"allocate completion flags");
         std::memset(host_,0,Parts*64);
         driver_check(cuMemHostGetDevicePointer(&device_,host_,0),"map completion flags");
@@ -38,11 +39,31 @@ public:
         }
         driver_check(status,"probe output completion");
         runtime_check(cudaStreamSynchronize(stream),"completion probe ready");
+        if(graph_) {
+            runtime_check(cudaStreamBeginCapture(stream,cudaStreamCaptureModeGlobal),"probe completion capture");
+            status=cuStreamWriteValue32(stream,device_,0,CU_STREAM_WRITE_VALUE_DEFAULT);
+            cudaGraph_t definition=nullptr;
+            auto ended=cudaStreamEndCapture(stream,&definition);
+            if(definition) cudaGraphDestroy(definition);
+            if(status==CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED || status==CUDA_ERROR_NOT_SUPPORTED) {
+                std::fprintf(stderr,"OUTPUT_COMPLETION supported=0 capture_unsupported=1\n");return;
+            }
+            driver_check(status,"capture completion probe write");
+            runtime_check(ended,"finish completion capture probe");
+            generation_=1;
+        }
         supported_=true;
-        std::fprintf(stderr,"OUTPUT_COMPLETION supported=1\n");
+        std::fprintf(stderr,"OUTPUT_COMPLETION supported=1 graph=%d\n",graph_);
     }
     bool enabled() const { return supported_; }
-    void begin() { ++generation_; }
+    void begin() {
+        if(!supported_) return;
+        if(graph_) {
+            // Every previous flag was observed before the preceding run ended.
+            // Reset them before launching the graph, whose writes use value 1.
+            for(unsigned part=0;part<Parts;++part) __atomic_store_n(host_+part*16,0u,__ATOMIC_RELEASE);
+        } else ++generation_;
+    }
     void record(cudaStream_t stream,unsigned part) {
         // Default flags include a system-scope fence for all preceding writes
         // in this stream. Never use NO_MEMORY_BARRIER for host-visible output.
