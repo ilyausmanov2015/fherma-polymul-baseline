@@ -29,6 +29,12 @@
 #ifndef FHERMA_STREAM_COPY
 #define FHERMA_STREAM_COPY 1
 #endif
+#ifndef FHERMA_COPY_THREADS
+#define FHERMA_COPY_THREADS 2
+#endif
+#ifndef FHERMA_PARALLEL_OUTPUT
+#define FHERMA_PARALLEL_OUTPUT 0
+#endif
 
 // Exact negacyclic NTT baseline. All device modular arithmetic uses cuPQC.
 #include "fherma.h"
@@ -316,7 +322,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     check(cudaGetLastError(),"NTT launch");
     fherma::Outputs out; out.c.shape={s.n,L};
 #if FHERMA_PINNED
-#if FHERMA_PARALLEL_COPY
+#if FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT
     // Allocate while the GPU executes the already-enqueued NTT kernels.
     out.c.data.resize(words);
 #endif
@@ -324,7 +330,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #if FHERMA_PROFILE
     auto unpack_start=std::chrono::steady_clock::now();
 #endif
-#if FHERMA_PARALLEL_COPY
+#if FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT
     s.copy.output(out.c.data.data(),s.host_output,bytes);
 #else
     out.c.data.assign(s.host_output,s.host_output+words);
