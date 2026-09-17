@@ -33,3 +33,10 @@ stream memory operations, захвата двух stream и порядок DMA �
 
 Семантика операций: NVIDIA CUDA 12.8 Driver API,
 https://docs.nvidia.com/cuda/archive/12.8.0/cuda-driver-api/group__CUDA__MEMOP.html
+
+
+Измерения: aa3bd16 — 441,994 мкс; Harvey 271ebe3 — 435,923;
+запуск после готовности первого сегмента 940b495 — 410,730. Во всех
+случаях 3/3 (+2 прогрева), флаги и capture поддержаны. FHERMA_INPUT_GRAPH_EARLY
+переключает ранний запуск; значение 0 начинает граф в callback первой части.
+В основной конфигурации INPUT_GRAPH выключен: выигрыша не подтвердил.
