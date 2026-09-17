@@ -1,3 +1,6 @@
+#ifndef FHERMA_KARATSUBA
+#define FHERMA_KARATSUBA 1
+#endif
 #ifndef FHERMA_PIPELINE_OUTPUT
 #define FHERMA_PIPELINE_OUTPUT 4
 #endif
@@ -130,12 +133,55 @@ __device__ Big multiply(const Big& a,const Big& b,const Mod& q) { return a.mul_m
 using Mod=Big;
 __device__ Big encode(const Big& x,const Mod&) { return x; }
 __device__ Big decode(const Big& x,const Mod&) { return x; }
+#if FHERMA_KARATSUBA
+using HalfBI=decltype(cupqc::BitWidth<448>()+cupqc::SM<800>()+cupqc::Thread());
+using Half=typename HalfBI::bigint;
+struct SplitProduct {Big lo,hi;};
+// Exact for a,b<2^868. The middle coefficient a0*b1+a1*b0 is <2^869,
+// so its calculation modulo 2^896 is exact even if z0+z2 wraps first.
+__device__ SplitProduct karatsuba_product(const Big& a,const Big& b) {
+    Half a0(uint32_t(0)),a1(uint32_t(0)),b0(uint32_t(0)),b1(uint32_t(0));
+    #pragma unroll
+    for(unsigned k=0;k<14;++k) {a0[k]=a[k];a1[k]=a[k+14];b0[k]=b[k];b1[k]=b[k+14];}
+    bool a_positive=a1>=a0,b_positive=b0>=b1;
+    Half da=a_positive ? a1-a0 : a0-a1,db=b_positive ? b0-b1 : b1-b0;
+    auto z0=a0.mul_wide(b0),z2=a1.mul_wide(b1);
+    SplitProduct result{Big(uint32_t(0)),Big(uint32_t(0))};
+    #pragma unroll
+    for(unsigned k=0;k<14;++k) {
+        result.lo[k]=z0.lo[k];result.lo[k+14]=z0.hi[k];
+        result.hi[k]=z2.lo[k];result.hi[k+14]=z2.hi[k];
+    }
+    Big middle=result.lo+result.hi;
+    auto delta=da.mul_wide(db);
+    Big difference(uint32_t(0));
+    #pragma unroll
+    for(unsigned k=0;k<14;++k) {difference[k]=delta.lo[k];difference[k+14]=delta.hi[k];}
+    middle=a_positive==b_positive ? middle+difference : middle-difference;
+    uint64_t carry=0;
+    #pragma unroll
+    for(unsigned k=0;k<14;++k) {
+        uint64_t word=uint64_t(result.lo[k+14])+middle[k]+carry;
+        result.lo[k+14]=uint32_t(word);carry=word>>32;
+    }
+    #pragma unroll
+    for(unsigned k=0;k<28;++k) {
+        uint64_t word=uint64_t(result.hi[k])+(k<14 ? uint32_t(middle[k+14]) : 0u)+carry;
+        result.hi[k]=uint32_t(word);carry=word>>32;
+    }
+    return result;
+}
+#endif
 // For q = 2^868-c, c < 2^28, a full product folds twice without division.
 // At each fold all intermediates fit the 896-bit cuPQC storage width.
 // The modulus shape is checked once on the host during setup.
 __device__ Big multiply(const Big& a,const Big& b,const Big& q) {
     const uint32_t c=uint32_t(0)-q[0];
+#if FHERMA_KARATSUBA
+    auto p=karatsuba_product(a,b);
+#else
     auto p=a.mul_wide(b);
+#endif
     // Extract z>>868 before overwriting the low half. Coefficients use
     // 27 full words and four bits of word 27.
     uint32_t h0=(p.lo[27]>>4)|(p.hi[0]<<28);
