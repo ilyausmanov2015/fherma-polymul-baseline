@@ -494,3 +494,24 @@ packing 98–103, submission 34–36, reserve+prefault+resize 129–134,
 Для ec6017f GMP N32768 + N1024 — 18/18; CUDA CI успешен.
 Далее отдельно проверяются persistent CPU input в mapped graph (abdfb08),
 WB-вход с профилем (c6b281f), vector stores прямого CRT (70774cd).
+
+
+## Fused convolution tile, 17 сентября 21:22 МСК
+
+ba8dd0b benchmark 20/20: 380,285 мкс, min 371,096, max 410,385,
+mean 381,2166; run 6aac2cb8e3bdd1a553121e47. Конкурсный enter пока
+не выполнялся: остаётся опубликованный a32b5aa / 383,2485.
+
+abdfb08 persistent mapped input graph: 3/3, 401,293 мкс.
+c6b281f WB mapped input graph с профилем: 3/3, 416,145 мкс.
+Packing 137–157 мкс, output allocation 128–137, ожидание 37–42,
+output 85–95. Сокращение enqueue не компенсировало общий overhead.
+70774cd vector mapped CRT: 3/3, 409,350 мкс, улучшение не подтверждено.
+
+fe5fc67 объединяет оба локальных forward NTT, произведение и inverse
+в одном блоке. 27/27 GMP, CUDA CI без spill (56 регистров), GPU 3/3
+375,286 мкс. Подробности: research/FUSED_CONVOLUTION_TILE_RU.md.
+0afe15c — отдельный radix-16 вариант, 18/18 GMP, CI без spill (70/72
+регистра). Подготовлен ef3a49e для профиля GPU без перекрытия.
+f34b6ea — отдельная проверка CPU idle UMWAIT с runtime CPUID guard;
+1050 pool jobs и 36+4 input cases под TSan прошли локально (ARM fallback).
