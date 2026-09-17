@@ -10,7 +10,7 @@ parser.add_argument('--define',action='append',default=[])
 parser.add_argument('--source',default='solve.cu')
 args = parser.parse_args()
 source_path=ROOT/args.source
-BUILD=ROOT/('build-emulation-rns' if args.source=='rns/solve.cu' else 'build-emulation')
+BUILD=ROOT/({'rns/solve.cu':'build-emulation-rns','quartic/solve.cu':'build-emulation-quartic'}.get(args.source,'build-emulation'))
 BUILD.mkdir(exist_ok=True)
 source = source_path.read_text()
 source = source.replace('#include <cupqc/bigint.hpp>', '#include "tests/cuda_emulation.h"')
@@ -36,7 +36,7 @@ for m in reversed(matches):
 source, count = re.subn(
     r'(\w+)<<<([^,<>]+),\s*([^<>]+)>>>\(([^;]+)\);',
     lambda m: 'emulate_launch('+m[2]+','+m[3].split(',')[0]+',[&] { return '+m[1]+'('+m[4]+'); });', source)
-expected=20 if args.source=='rns/solve.cu' else 14
+expected={'rns/solve.cu':20,'quartic/solve.cu':17}.get(args.source,14)
 assert count == expected, f'Expected {expected} CUDA launch sites, saw {count}; update test adapter explicitly.'
 assert '<<<' not in source
 (BUILD / 'solve_emulated.cpp').write_text(source)

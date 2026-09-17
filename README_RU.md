@@ -3,8 +3,8 @@
 Задача: `polynomial-multiplication/negacyclic@1.0.0`,
 `c = a*b mod (X^N+1, q)`. Основная точка: `N=32768`, `W=868`, `L=28`.
 
-**Официальный результат 17 сентября 2026: 20/20, медиана 0,474 мс —
-ускорение 5,35× относительно исходного baseline.**
+**Официальный результат 17 сентября 2026: 20/20, медиана 0,464 мс —
+ускорение 5,45× относительно исходного baseline.**
 На проверке 17 сентября, 17:01 МСК: **3-е место из 6**.
 GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
 Исходники: https://github.com/ilyausmanov2015/fherma-polymul-baseline
@@ -19,16 +19,17 @@ GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
 | RNS, radix-4, точный CRT1024, перекрытие ввода/вывода | e064b52 | 20/20 | 0,597 мс | 0,576–0,633 мс |
 | CRT928, объединённый tail-transpose, cached CPU output | d155c4f | 20/20 | 0,514 мс | 0,503–0,532 мс |
 | H2D и перевод в RNS одновременно, coalesced CRT output | 122a5b2 | 20/20 | 0,474 мс | 0,453–0,496 мс |
+| 16 потоков CPU на входе, 8 на выходе | 9ed2a18 | 20/20 | 0,464 мс | 0,456–0,488 мс |
 
 Два дополнительных прогревочных случая в каждом запуске также прошли,
 но не входят в score. CUDA 12.8.61, cuPQC 0.6.0.
 
-[Новый полный запуск](https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aabf0e2b615118421bf8823),
+[Новый полный запуск](https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aabf6dcb615118421bf8b5e),
 [исходный запуск](https://www.fherma.io/kernels/polynomial-multiplication/specifications/negacyclic/runs/6aaabf591be2e96f7342c7d1),
 [лидерборд](https://www.fherma.io/kernels/polynomial-multiplication/challenges/polynomial-multiplication-2025?tab=leaderboard).
 Измерения промежуточных вариантов: `results/experiments.json` и `EXPERIMENTS_RU.md`.
 Текущий HEAD может содержать экспериментальные изменения; последний полностью
-подтверждённый конкурсный коммит — `122a5b2d88b7de9cac8123855a0b48608e82360a`.
+подтверждённый конкурсный коммит — `9ed2a18a03e73370f3bd665e6fdd9212203b0407`.
 
 ## Реализация
 
@@ -58,8 +59,8 @@ GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
 Код поддерживает степени двойки 2<=N<=32768, W=868, q=2^868-c, 0<c<2^28;
 на платформе заявлена только соревновательная точка.
 
-Полный прогон 122a5b2: медиана 473,7065 мкс, среднее 473,253 мкс,
-диапазон 452,704–495,742 мкс. Короткий прогон — 465,816 мкс, 3/3.
+Полный прогон 9ed2a18: медиана 464,3965 мкс, среднее 466,455 мкс,
+диапазон 456,475–487,841 мкс. Короткий прогон — 461,668 мкс, 3/3.
 Отчёт: `results/best-challenge.json`. Границы CRT и журнал:
 `research/RNS_PLAN_RU.md`, `EXPERIMENTS_RU.md`.
 
@@ -69,9 +70,9 @@ GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 ГБ.
 результат — 701,431 мкс, коммит 20f262e. Эксперимент Карацубы для него
 документирован в `research/KARATSUBA_RU.md`.
 
-Backend выбирается параметром CMake `-DFHERMA_SOLVER=rns` или `wide`.
+Backend выбирается параметром CMake `-DFHERMA_SOLVER=rns`, `wide` или экспериментальный `quartic`.
 Текущий HEAD может содержать очередной эксперимент; для воспроизведения
-конкурсного результата используйте точный коммит 122a5b2 из начала документа.
+конкурсного результата используйте точный коммит 9ed2a18 из начала документа.
 
 ## Сборка на GPU
 

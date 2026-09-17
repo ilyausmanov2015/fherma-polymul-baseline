@@ -6,7 +6,7 @@ on:
         description: Compile variant
         type: choice
         default: default
-        options: [default, warp4, warp8, rns]
+        options: [default, warp4, warp8, rns, quartic]
 
 permissions:
   contents: read
@@ -56,6 +56,7 @@ jobs:
             warp4) defs="-DFHERMA_MONTGOMERY=1 -DFHERMA_SOA=0 -DFHERMA_TPI=4 -DFHERMA_FUSED_TAIL=0" ;;
             warp8) defs="-DFHERMA_MONTGOMERY=1 -DFHERMA_SOA=0 -DFHERMA_TPI=8 -DFHERMA_FUSED_TAIL=0" ;;
             rns) solver="rns" ;;
+            quartic) solver="quartic" ;;
           esac
           cmake -B build "-DFHERMA_SOLVER=$solver" -DFHERMA_CUDA_ARCH=sm_120 -DFHERMA_RESOURCE_REPORT=ON "-DCMAKE_CUDA_FLAGS=$defs"
           cmake --build build -j2
