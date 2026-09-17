@@ -1,5 +1,5 @@
 #ifndef FHERMA_PROFILE
-#define FHERMA_PROFILE 0
+#define FHERMA_PROFILE 1
 #endif
 #ifndef FHERMA_GRAPH
 #define FHERMA_GRAPH 1
