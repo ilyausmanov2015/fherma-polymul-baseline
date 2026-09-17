@@ -2869,5 +2869,104 @@
         "copy": 169.677
       }
     ]
+  },
+  {
+    "id": "6aabe686e3bdd1a5530babb0",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.352702565,
+    "started_at": "2026-09-17T13:09:29.024Z",
+    "finished_at": "2026-09-17T13:11:06.441Z",
+    "commit": "026d825ab7ec0c752aa9f70efd0d5e2a0ff1d270",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.000750116,
+          "median": 0.000751409,
+          "mean": 0.0007597290000000001,
+          "max": 0.000777662
+        }
+      }
+    ],
+    "case_errors": [],
+    "profiles_us": [
+      {
+        "h2d": 139.968,
+        "prepare": 90.048,
+        "forward": 51.2,
+        "product": 10.24,
+        "inverse": 28.672,
+        "finish": 40.96,
+        "d2h": 100.416
+      },
+      {
+        "h2d": 137.888,
+        "prepare": 88.384,
+        "forward": 51.2,
+        "product": 10.24,
+        "inverse": 28.672,
+        "finish": 43.04,
+        "d2h": 79.36
+      },
+      {
+        "h2d": 136.768,
+        "prepare": 90.08,
+        "forward": 51.2,
+        "product": 10.24,
+        "inverse": 28.672,
+        "finish": 40.96,
+        "d2h": 79.52
+      },
+      {
+        "h2d": 137.248,
+        "prepare": 87.712,
+        "forward": 51.2,
+        "product": 10.24,
+        "inverse": 28.672,
+        "finish": 40.96,
+        "d2h": 80.416
+      },
+      {
+        "h2d": 136.896,
+        "prepare": 91.36,
+        "forward": 51.2,
+        "product": 10.24,
+        "inverse": 28.672,
+        "finish": 40.96,
+        "d2h": 83.072
+      }
+    ],
+    "host_us": [
+      {
+        "pack": 236.272,
+        "unpack": 161.613
+      },
+      {
+        "pack": 123.583,
+        "unpack": 164.051
+      },
+      {
+        "pack": 132.477,
+        "unpack": 165.461
+      },
+      {
+        "pack": 122.319,
+        "unpack": 152.921
+      },
+      {
+        "pack": 122.491,
+        "unpack": 151.697
+      }
+    ],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": []
   }
 ]
