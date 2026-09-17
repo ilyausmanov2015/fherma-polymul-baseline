@@ -1,3 +1,6 @@
+#ifndef FHERMA_DIRECT_OUTPUT
+#define FHERMA_DIRECT_OUTPUT 1
+#endif
 #ifndef FHERMA_GRAPH
 #define FHERMA_GRAPH 1
 #endif
@@ -147,7 +150,28 @@ struct RegisteredInput {
     void release() { if(ptr) { check(cudaHostUnregister(ptr),"unregister input"); ptr=nullptr; } }
     ~RegisteredInput() { if(ptr) cudaHostUnregister(ptr); }
 };
+// One owned vector is prepared ahead. Every run replenishes it inside the
+// measured call, while the GPU can execute. Returned storage is unregistered
+// before ownership passes to the caller; no caller memory is retained.
+struct NextOutput {
+    std::vector<uint32_t> data;
+    bool registered=false;
+    void prepare(size_t words) {
+        // Padding separates registered page ranges even for small vectors.
+        data.resize(words+1024); data.resize(words);
+        check(cudaHostRegister(data.data(),words*4,0),"register next output");
+        registered=true;
+    }
+    void take(std::vector<uint32_t>& out,RegisteredInput& registration) {
+        if(!registered) throw std::runtime_error("output buffer unavailable after a failed run");
+        out.swap(data); registration.ptr=out.data(); registered=false;
+    }
+    ~NextOutput() { if(registered) cudaHostUnregister(data.data()); }
+};
 struct State {
+#if FHERMA_DIRECT_OUTPUT
+    NextOutput next_output;
+#endif
 #if FHERMA_PARALLEL_COPY
     HostCopyPool copy;
 #endif
@@ -308,6 +332,10 @@ void* fherma_init(const fherma::Point& p) {
     std::memset(s->host_input,0,size_t(2)*p.N*L*4);
     std::memset(s->host_output,0,size_t(p.N)*L*4);
 #endif
+#if FHERMA_DIRECT_OUTPUT
+    static_assert(FHERMA_PINNED && !FHERMA_REGISTER_INPUTS,"direct output requires staged pinned inputs");
+    s->next_output.prepare(size_t(p.N)*L);
+#endif
     check(cudaMemcpy(s->q,p.q.data.data(),L*4,cudaMemcpyHostToDevice),"copy q");
     check(cudaMemcpy(s->roots,packed.data(),3*L*4,cudaMemcpyHostToDevice),"copy roots");
     make_tables<<<(p.N*FHERMA_TPI+127)/128,128>>>(s->q,s->roots,s->twist,s->inv_twist,s->scale,p.N);
@@ -322,7 +350,9 @@ void* fherma_init(const fherma::Point& p) {
     size_t bytes=size_t(s->n)*L*4;
     check(cudaMemcpyAsync(s->input,s->host_input,2*bytes,cudaMemcpyHostToDevice,s->stream),"capture H2D");
     launch_ntt(*s,s->stream);
+#if !FHERMA_DIRECT_OUTPUT
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture D2H");
+#endif
     cudaGraph_t graph=nullptr;
     check(cudaStreamEndCapture(s->stream,&graph),"end capture");
     auto status=cudaGraphInstantiateWithFlags(&s->graph,graph,0);
@@ -342,10 +372,22 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     std::memcpy(s.host_input,in.a.data.data(),bytes);
     std::memcpy(s.host_input+words,in.b.data.data(),bytes);
 #endif
+    fherma::Outputs out; out.c.shape={s.n,L};
+#if FHERMA_DIRECT_OUTPUT
+    RegisteredInput output_registration;
+    s.next_output.take(out.c.data,output_registration);
+    try {
+        check(cudaGraphLaunch(s.graph,s.stream),"execute graph");
+        check(cudaMemcpyAsync(out.c.data.data(),s.input,bytes,cudaMemcpyDeviceToHost,s.stream),"direct output D2H");
+        s.next_output.prepare(words);
+        check(cudaStreamSynchronize(s.stream),"direct output ready");
+    } catch(...) { cudaStreamSynchronize(s.stream); throw; }
+    output_registration.release();
+#else
     check(cudaGraphLaunch(s.graph,s.stream),"execute graph");
     check(cudaStreamSynchronize(s.stream),"graph result ready");
-    fherma::Outputs out; out.c.shape={s.n,L};
     out.c.data.assign(s.host_output,s.host_output+words);
+#endif
     return out;
 #else
     mark(s,0);
@@ -382,7 +424,17 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     mark(s,1);
     launch_ntt(s);
     fherma::Outputs out; out.c.shape={s.n,L};
-#if FHERMA_PINNED
+#if FHERMA_DIRECT_OUTPUT
+    RegisteredInput output_registration;
+    s.next_output.take(out.c.data,output_registration);
+    check(cudaMemcpy(out.c.data.data(),s.input,bytes,cudaMemcpyDeviceToHost),"direct output D2H");
+    s.next_output.prepare(words);
+    output_registration.release();
+    registered_a.release(); registered_b.release();
+#if FHERMA_PROFILE
+    double unpack_us=0; // This variant is measured without the host-copy diagnostic.
+#endif
+#elif FHERMA_PINNED
 #if FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT
     // Allocate while the GPU executes the already-enqueued NTT kernels.
     out.c.data.resize(words);
