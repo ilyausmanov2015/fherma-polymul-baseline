@@ -2,7 +2,7 @@
 #define FHERMA_CRT_OUTPUT_SIGNAL 0
 #endif
 #ifndef FHERMA_INPUT_GRAPH
-#define FHERMA_INPUT_GRAPH 0
+#define FHERMA_INPUT_GRAPH 1
 #endif
 #ifndef FHERMA_INPUT_GRAPH_EARLY
 #define FHERMA_INPUT_GRAPH_EARLY 0
@@ -56,7 +56,7 @@
 #define FHERMA_HARVEY 1
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 0
+#define FHERMA_OUTPUT_GRAPH 1
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -128,7 +128,7 @@
 #define FHERMA_RNS_TILED_PREPARE 1
 #endif
 #ifndef FHERMA_INPUT_WC
-#define FHERMA_INPUT_WC 0
+#define FHERMA_INPUT_WC 1
 #endif
 #ifndef FHERMA_STREAM_OUTPUT
 #define FHERMA_STREAM_OUTPUT 0
@@ -170,7 +170,7 @@
 #define FHERMA_SPIN_COPY 1
 #endif
 #ifndef FHERMA_STREAM_COPY
-#define FHERMA_STREAM_COPY 0
+#define FHERMA_STREAM_COPY 1
 #endif
 #include "fherma.h"
 #include "quartic/host_setup.h"
@@ -1188,7 +1188,7 @@ void* fherma_init(const fherma::Point& p) {
 #endif
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
 #if defined(__CUDACC__) && FHERMA_INPUT_GRAPH
-    static_assert(FHERMA_PIPELINE_INPUT>1 && FHERMA_OVERLAP_PREPARE && FHERMA_PAIRED_INPUT && FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE && !FHERMA_MAPPED_INPUT,"input graph needs paired staged input and captured output");
+    static_assert(FHERMA_PIPELINE_INPUT>1 && FHERMA_OVERLAP_PREPARE && FHERMA_PAIRED_INPUT && FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE,"input graph needs paired staged input and captured output");
     if(s->overlap_input) s->input_graph=s->input_completion.init(s->stream);
     if(s->input_graph) check(cudaEventCreateWithFlags(&s->input_root,cudaEventDisableTiming),"input graph root event");
 #endif
@@ -1226,6 +1226,15 @@ void* fherma_init(const fherma::Point& p) {
     mark(*s,1,s->stream);
 #if defined(__CUDACC__) && FHERMA_INPUT_GRAPH
     if(s->input_graph) {
+        if(FHERMA_MAPPED_INPUT) {
+            // The CPU has fenced all writes before publishing each flag.
+            // With mapped staging, a ready tile can go straight to prepare;
+            // no DMA branch or inter-stream handoff is needed.
+            for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
+                s->input_completion.capture_wait(s->stream,part);
+                launch_input_chunk(*s,s->n*part/FHERMA_PIPELINE_INPUT,s->n/FHERMA_PIPELINE_INPUT,s->stream);
+            }
+        } else {
         check(cudaEventRecord(s->input_root,s->stream),"capture input graph root");
         check(cudaStreamWaitEvent(s->transfer_stream,s->input_root,0),"capture input transfer branch");
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
@@ -1236,6 +1245,7 @@ void* fherma_init(const fherma::Point& p) {
             check(cudaEventRecord(s->input_ready[part],s->transfer_stream),"capture input DMA ready");
             check(cudaStreamWaitEvent(s->stream,s->input_ready[part],0),"capture input prepare dependency");
             launch_input_chunk(*s,s->n*part/FHERMA_PIPELINE_INPUT,s->n/FHERMA_PIPELINE_INPUT,s->stream);
+        }
         }
     }
 #endif

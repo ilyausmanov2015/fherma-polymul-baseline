@@ -40,3 +40,14 @@ https://docs.nvidia.com/cuda/archive/12.8.0/cuda-driver-api/group__CUDA__MEMOP.h
 случаях 3/3 (+2 прогрева), флаги и capture поддержаны. FHERMA_INPUT_GRAPH_EARLY
 переключает ранний запуск; значение 0 начинает граф в callback первой части.
 В основной конфигурации INPUT_GRAPH выключен: выигрыша не подтвердил.
+
+## Mapped input без DMA
+
+Дополнительный вариант объединяет mapped prepare с теми же flags.
+На единственном compute stream идут wait(part) → prepare(part) для каждой
+части, затем NTT/CRT и D2H. Дополнительных transfer nodes и межпоточных
+событий нет. CPU публикует данные после SFENCE и worker acknowledgments;
+при EARLY=0 граф запускается после первой публикации. Все GPU-зависимости
+последовательны в одном stream, а производитель входа — независимый CPU.
+Цель — сократить четыре CPU graph launch до одного. Наличие ускорения
+проверяется отдельно от предыдущего варианта с DMA.

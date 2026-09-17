@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <string>
 
-// Host-produced readiness flags for a graph's input DMA nodes. The graph never
+// Host-produced readiness flags for a graph's input DMA or mapped prepare nodes. The graph never
 // owns or reads caller storage; it only reads our staged input after publication.
 template<unsigned Parts> class InputCompletion {
     uint32_t* host_=nullptr;
