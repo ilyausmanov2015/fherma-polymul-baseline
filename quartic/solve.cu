@@ -1,5 +1,8 @@
+#ifndef FHERMA_QUARTIC_COMPACT_SCALE
+#define FHERMA_QUARTIC_COMPACT_SCALE 1
+#endif
 #ifndef FHERMA_OVERLAP_PREPARE
-#define FHERMA_OVERLAP_PREPARE 0
+#define FHERMA_OVERLAP_PREPARE 1
 #endif
 #ifndef FHERMA_CRT_TILED_OUTPUT
 #define FHERMA_CRT_TILED_OUTPUT 1
@@ -17,10 +20,10 @@
 #define FHERMA_RNS_FUSED_TRANSPOSE 1
 #endif
 #ifndef FHERMA_PIPELINE_INPUT
-#define FHERMA_PIPELINE_INPUT 1
+#define FHERMA_PIPELINE_INPUT 4
 #endif
 #ifndef FHERMA_PIPELINE_OUTPUT
-#define FHERMA_PIPELINE_OUTPUT 1
+#define FHERMA_PIPELINE_OUTPUT 4
 #endif
 #ifndef FHERMA_RNS_RADIX4
 #define FHERMA_RNS_RADIX4 1
@@ -35,7 +38,7 @@
 #define FHERMA_RNS_TAIL 1
 #endif
 #ifndef FHERMA_PROFILE
-#define FHERMA_PROFILE 1
+#define FHERMA_PROFILE 0
 #endif
 #ifndef FHERMA_GRAPH
 #define FHERMA_GRAPH 1
@@ -299,7 +302,12 @@ __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const 
             uint32_t u=sub_mod(a,c,p),v=shoup(sub_mod(b,d,p),roots[pi].i,p);
             mixed=component==1 ? sub_mod(u,v,p) : add_mod(u,v,p);
         }
+        #if FHERMA_QUARTIC_COMPACT_SCALE
+        uint32_t normalized=shoup(mixed,roots[pi].inverse_powers[component],p);
+        uint32_t t=shoup(normalized,scales[pi*n+i],p);
+#else
         uint32_t t=shoup(mixed,scales[(component*ModCount+pi)*n+i],p);
+#endif
         uint64_t term=uint64_t(t)*modulus.reciprocal,next=fraction+term;
         alpha+=next<fraction;fraction=next;
         accumulator=accumulator+Wide(bases,pi).mul_scalar(t);
@@ -476,6 +484,15 @@ void* fherma_init(const fherma::Point& p) {
                   "profile arithmetic separately from overlapped host transfers");
     static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments fit the smallest point");
     pin_near_gpu();
+#ifdef __CUDACC__
+    int device=0,pageable=0,host_tables=0,concurrent=0,direct=0;
+    check(cudaGetDevice(&device),"query active GPU");
+    check(cudaDeviceGetAttribute(&pageable,cudaDevAttrPageableMemoryAccess,device),"query pageable access");
+    check(cudaDeviceGetAttribute(&host_tables,cudaDevAttrPageableMemoryAccessUsesHostPageTables,device),"query host page tables");
+    check(cudaDeviceGetAttribute(&concurrent,cudaDevAttrConcurrentManagedAccess,device),"query concurrent managed access");
+    check(cudaDeviceGetAttribute(&direct,cudaDevAttrDirectManagedMemAccessFromHost,device),"query direct host access");
+    std::fprintf(stderr,"MEMORY_CAPS pageable=%d host_tables=%d concurrent=%d direct=%d\n",pageable,host_tables,concurrent,direct);
+#endif
     auto s=std::make_unique<State>();s->n=p.N;s->logn=__builtin_ctz(p.N);
     s->overlap_input=FHERMA_OVERLAP_PREPARE && FHERMA_PIPELINE_INPUT>1 && FHERMA_RNS_TAIL && p.N==32768;
     static_assert(!FHERMA_OVERLAP_PREPARE || (!FHERMA_PROFILE && !FHERMA_RNS_GROUPED),"chunk prepare uses SoA without diagnostic events");
@@ -484,9 +501,11 @@ void* fherma_init(const fherma::Point& p) {
     upload(s->input_powers,constants.input_powers);upload(s->roots,constants.roots);
     upload(s->mods,constants.mods);upload(s->bases,constants.bases);
     upload(s->product,constants.product);upload(s->q,p.q.data);
+    constexpr unsigned ScaleCount=FHERMA_QUARTIC_COMPACT_SCALE ? quartic::ModCount : quartic::PrimeCount;
+    constants.scale.resize(size_t(ScaleCount)*p.N);
     if(FHERMA_RNS_TAIL && p.N==32768) {
         auto original=constants.scale;
-        for(unsigned pi=0;pi<quartic::PrimeCount;++pi)
+        for(unsigned pi=0;pi<ScaleCount;++pi)
             for(unsigned i=0;i<p.N;++i)
                 constants.scale[pi*p.N+i]=original[pi*p.N+(i&31)*1024+(i>>5)];
     }

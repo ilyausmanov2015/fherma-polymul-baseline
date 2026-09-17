@@ -5,7 +5,7 @@ constexpr unsigned ModCount=16,Components=4,PrimeCount=ModCount*Components;
 constexpr unsigned AbiWords=28,PartBits=217,PartWords=7,WideWords=16,Tile=1024;
 using rns::Words;using rns::SmallMod;using rns::Twiddle;
 using rns::pow_mod;using rns::twiddle;
-struct Roots { Twiddle powers[4],i; };
+struct Roots { Twiddle powers[4],i,inverse_powers[4]; };
 inline uint32_t square_root(uint32_t a,uint32_t p) {
     if(!a) return 0;
     if(pow_mod(a,(p-1)/2,p)!=1) throw std::runtime_error("quartic square root does not exist");
@@ -75,6 +75,7 @@ inline Setup setup(unsigned n,uint32_t delta) {
         s.bases.insert(s.bases.end(),basis.begin(),basis.end());
         uint32_t basis_inverse=pow_mod(rns::mod_small(basis,p),p-2,p);
         uint32_t inverse_psi=pow_mod(psi,p-2,p),inverse_r=pow_mod(r,p-2,p);
+        for(unsigned j=0;j<4;++j) s.roots[pi].inverse_powers[j]=twiddle(pow_mod(inverse_r,j,p),p);
         uint32_t common=uint64_t(basis_inverse)*pow_mod(4*n,p-2,p)%p;
         uint32_t factors[4];
         for(unsigned j=0;j<4;++j) factors[j]=uint64_t(common)*pow_mod(inverse_r,j,p)%p;
