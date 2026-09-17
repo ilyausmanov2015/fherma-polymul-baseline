@@ -384,7 +384,7 @@ __global__ void transpose_tail(const uint32_t* source,uint32_t* dest,unsigned n)
 }
 __global__ void make_small_tables(const uint32_t* forward,const uint32_t* inverse,
                                   uint32_t* out_forward,uint32_t* out_inverse,unsigned n) {
-    unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
+    unsigned i=(blockIdx.x*blockDim.x+threadIdx.x)/FHERMA_TPI;
     if(i>=256) return;
     store_coeff(load_coeff(forward,i*(n/256),n),out_forward,i,256);
     store_coeff(load_coeff(inverse,i*(n/256),n),out_inverse,i,256);
@@ -531,7 +531,7 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaGetLastError(),"table launch");
     if(FHERMA_SMALL_TABLES && FHERMA_FUSED_SMALL && p.N>=256) {
         alloc(&s->small_twist,256); alloc(&s->small_inv_twist,256);
-        make_small_tables<<<2,128>>>(s->twist,s->inv_twist,s->small_twist,s->small_inv_twist,p.N);
+        make_small_tables<<<2*FHERMA_TPI,128>>>(s->twist,s->inv_twist,s->small_twist,s->small_inv_twist,p.N);
         check(cudaGetLastError(),"small table launch");
     }
     if(FHERMA_FUSED_TAIL && FHERMA_TAIL_TABLES && p.N==32768) {
