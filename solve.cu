@@ -1,3 +1,6 @@
+#ifndef FHERMA_HOST_PROFILE
+#define FHERMA_HOST_PROFILE 1
+#endif
 #ifndef FHERMA_FUSED_TAIL
 #define FHERMA_FUSED_TAIL 1
 #endif
@@ -45,7 +48,7 @@
 #define FHERMA_STREAM_COPY 1
 #endif
 #ifndef FHERMA_COPY_THREADS
-#define FHERMA_COPY_THREADS 2
+#define FHERMA_COPY_THREADS 4
 #endif
 #ifndef FHERMA_PARALLEL_OUTPUT
 #define FHERMA_PARALLEL_OUTPUT 0
@@ -451,11 +454,19 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     auto& s=*static_cast<State*>(opaque); size_t words=size_t(s.n)*L, bytes=words*4;
     if(in.a.data.size()!=words || in.b.data.size()!=words) throw std::runtime_error("input size");
 #if FHERMA_GRAPH
+#if FHERMA_HOST_PROFILE
+    using HostClock=std::chrono::steady_clock;
+    auto pack_start=HostClock::now();
+#endif
 #if FHERMA_PARALLEL_COPY
     s.copy.inputs(s.host_input,in.a.data.data(),in.b.data.data(),bytes);
 #else
     std::memcpy(s.host_input,in.a.data.data(),bytes);
     std::memcpy(s.host_input+words,in.b.data.data(),bytes);
+#endif
+#if FHERMA_HOST_PROFILE
+    auto pack_end=HostClock::now();
+    HostClock::time_point enqueued,prepared,synced,released;
 #endif
     fherma::Outputs out; out.c.shape={s.n,L};
 #if FHERMA_DIRECT_OUTPUT
@@ -464,10 +475,25 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     try {
         check(cudaGraphLaunch(s.graph,s.stream),"execute graph");
         check(cudaMemcpyAsync(out.c.data.data(),s.input,bytes,cudaMemcpyDeviceToHost,s.stream),"direct output D2H");
+#if FHERMA_HOST_PROFILE
+        enqueued=HostClock::now();
+#endif
         s.next_output.prepare(words);
+#if FHERMA_HOST_PROFILE
+        prepared=HostClock::now();
+#endif
         check(cudaStreamSynchronize(s.stream),"direct output ready");
+#if FHERMA_HOST_PROFILE
+        synced=HostClock::now();
+#endif
     } catch(...) { cudaStreamSynchronize(s.stream); throw; }
     output_registration.release();
+#if FHERMA_HOST_PROFILE
+    released=HostClock::now();
+    auto us=[](auto start,auto end) { return std::chrono::duration<double,std::micro>(end-start).count(); };
+    std::fprintf(stderr,"HOST_GRAPH_US pack=%.3f enqueue=%.3f prepare_output=%.3f wait=%.3f unregister=%.3f\n",
+                 us(pack_start,pack_end),us(pack_end,enqueued),us(enqueued,prepared),us(prepared,synced),us(synced,released));
+#endif
 #else
     check(cudaGraphLaunch(s.graph,s.stream),"execute graph");
     check(cudaStreamSynchronize(s.stream),"graph result ready");
