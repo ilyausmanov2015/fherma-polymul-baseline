@@ -1,3 +1,6 @@
+#ifndef FHERMA_HUGE_OUTPUT
+#define FHERMA_HUGE_OUTPUT 1
+#endif
 #ifndef FHERMA_FIRST_CPU
 #define FHERMA_FIRST_CPU 1
 #endif
@@ -91,6 +94,7 @@
 #include <cuda_runtime.h>
 #include "host_affinity.h"
 #include "host_copy_pool.h"
+#include "host_output_memory.h"
 #include "input_pipeline.h"
 #include <memory>
 #include <cstring>
@@ -865,6 +869,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         launch_rns(s);
 #endif
         output.c.data.reserve(words);
+        if(FHERMA_HUGE_OUTPUT) advise_output_hugepages(output.c.data.data(),bytes);
         s.copy.prefault(output.c.data.data(),bytes);
         output.c.data.resize(words);
 #if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
