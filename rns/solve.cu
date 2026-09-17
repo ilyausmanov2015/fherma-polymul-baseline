@@ -1,3 +1,6 @@
+#ifndef FHERMA_RNS_GROUPED
+#define FHERMA_RNS_GROUPED 1
+#endif
 #ifndef FHERMA_CRT_PARTS
 #define FHERMA_CRT_PARTS 1
 #endif
@@ -84,6 +87,31 @@ __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* m
     }
     uint32_t value=shoup(add_mod(even,odd,modulus.p),twists[prime_i*n+i],modulus.p);
     ab[blockIdx.y*n+(__brev(i)>>(32-logn))]=value;
+}
+// Four warps reuse 32 complete coefficients. Padding to 29 words avoids
+// shared-memory bank conflicts when a warp reads the same limb of 32 inputs.
+__global__ void prepare_grouped(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
+                                const Twiddle* twists,const Twiddle* powers,unsigned n,unsigned logn) {
+    __shared__ uint32_t coefficients[32*29];
+    constexpr unsigned PrimeGroups=(PrimeCount+3)/4;
+    unsigned t=threadIdx.x,base=blockIdx.x*32,poly=blockIdx.y/PrimeGroups;
+    unsigned prime_i=(blockIdx.y%PrimeGroups)*4+t/32,i=base+(t&31);
+    const uint32_t* source=input+(poly*n+base)*AbiWords;
+    #pragma unroll
+    for(unsigned word=t;word<32*AbiWords;word+=128) {
+        unsigned coefficient=word/AbiWords,limb=word%AbiWords;
+        if(base+coefficient<n) coefficients[coefficient*29+limb]=source[word];
+    }
+    __syncthreads();
+    if(i>=n || prime_i>=PrimeCount) return;
+    uint32_t p=mods[prime_i].p,even=0,odd=0;
+    #pragma unroll
+    for(unsigned limb=0;limb<AbiWords;++limb) {
+        uint32_t term=shoup(coefficients[(t&31)*29+limb],powers[prime_i*AbiWords+limb],p);
+        if(limb&1) odd=add_mod(odd,term,p);else even=add_mod(even,term,p);
+    }
+    uint32_t value=shoup(add_mod(even,odd,p),twists[prime_i*n+i],p);
+    ab[(poly*PrimeCount+prime_i)*n+(__brev(i)>>(32-logn))]=value;
 }
 __global__ void small_rns(uint32_t* values,const SmallMod* mods,const Twiddle* tables,unsigned n) {
     __shared__ uint32_t tile[Tile];
@@ -264,9 +292,14 @@ template<class T> void upload(T*& destination,const std::vector<T>& source) {
 }
 void launch_rns(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
-    dim3 abi_tiles((s.n+31)/32,2);
-    transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n);
-    prepare_rns<<<full,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn);
+    if(FHERMA_RNS_GROUPED) {
+        dim3 groups((s.n+31)/32,2*((PrimeCount+3)/4));
+        prepare_grouped<<<groups,128,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn);
+    } else {
+        dim3 abi_tiles((s.n+31)/32,2);
+        transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n);
+        prepare_rns<<<full,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn);
+    }
     mark(s,2,stream);
     unsigned first=1;
     if(s.n>=Tile) {
@@ -345,7 +378,7 @@ void* fherma_init(const fherma::Point& p) {
     }
     size_t bytes=size_t(p.N)*rns::AbiWords*4;
     check(cudaMalloc(&s->input,2*bytes),"allocate ABI buffers");
-    check(cudaMalloc(&s->input_soa,2*bytes),"allocate limb-plane inputs");
+    if(!FHERMA_RNS_GROUPED) check(cudaMalloc(&s->input_soa,2*bytes),"allocate limb-plane inputs");
     check(cudaMalloc(&s->ab,size_t(2)*rns::PrimeCount*p.N*4),"allocate RNS operands");
     check(cudaMalloc(&s->c,size_t(rns::PrimeCount)*p.N*4),"allocate RNS inverse");
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_input),2*bytes),"pinned RNS inputs");

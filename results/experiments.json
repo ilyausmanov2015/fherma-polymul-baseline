@@ -2041,5 +2041,72 @@
     "host_graph_us": [],
     "host_alloc_us": [],
     "host_staged_us": []
+  },
+  {
+    "id": "6aabe1b8e3bdd1a5530b6733",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.474214227,
+    "started_at": "2026-09-17T12:48:56.608Z",
+    "finished_at": "2026-09-17T12:50:35.360Z",
+    "commit": "46616df3cacbfcf52158c22d01055a7ef697c7e0",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.000777482,
+          "median": 0.000800873,
+          "mean": 0.0008052843333333333,
+          "max": 0.000837498
+        }
+      }
+    ],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": [
+      {
+        "pack": 140.481,
+        "enqueue": 30.058,
+        "allocate": 552.848,
+        "wait": 30.661,
+        "copy": 125.359
+      },
+      {
+        "pack": 90.226,
+        "enqueue": 30.75,
+        "allocate": 194.111,
+        "wait": 386.818,
+        "copy": 138.33
+      },
+      {
+        "pack": 84.668,
+        "enqueue": 28.263,
+        "allocate": 187.892,
+        "wait": 398.038,
+        "copy": 126.162
+      },
+      {
+        "pack": 71.805,
+        "enqueue": 25.663,
+        "allocate": 164.899,
+        "wait": 387.022,
+        "copy": 115.695
+      },
+      {
+        "pack": 87.789,
+        "enqueue": 28.229,
+        "allocate": 176.359,
+        "wait": 405.089,
+        "copy": 92.796
+      }
+    ]
   }
 ]
