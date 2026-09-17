@@ -1022,6 +1022,9 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(!FHERMA_CRT_PIPELINE || (FHERMA_PIPELINE_OUTPUT>1 && FHERMA_PIPELINE_OUTPUT%(FHERMA_CRT_PIPELINE ? FHERMA_CRT_PIPELINE : 1)==0),"whole DMA parts per CRT chunk");
     static_assert(!FHERMA_ASYNC_OUTPUT_ALLOC || !(FHERMA_OUTPUT_SPARE || FHERMA_OUTPUT_APPEND || FHERMA_HUGE_OUTPUT),"async allocation owns ordinary fresh vectors");
     pin_near_gpu();
+#if FHERMA_DIRECT_COPY && defined(__x86_64__) && defined(__GNUC__)
+    std::fprintf(stderr,"DIRECT_COPY movdir64b=%d\n",bool(__builtin_cpu_supports("movdir64b")));
+#endif
 #if FHERMA_HOST_PROFILE && defined(__linux__)
     std::string thp_policy;
     std::getline(std::ifstream("/sys/kernel/mm/transparent_hugepage/enabled"),thp_policy);
