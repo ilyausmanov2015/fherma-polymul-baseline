@@ -33,6 +33,8 @@ jobs:
             g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=2 -DFHERMA_SPIN_COPY=$mode -DFHERMA_STREAM_COPY=1 tests/host_copy_pool.cpp -o /tmp/host-pool-check
             /tmp/host-pool-check
           done
+          g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=2 -DFHERMA_OUTPUT_THREADS=1 -DFHERMA_SPIN_COPY=1 -DFHERMA_COPY_ACKS=1 -DFHERMA_MAIN_OUTPUT=1 -DFHERMA_FIRST_CPU=1 tests/host_copy_pool.cpp -o /tmp/host-pool-acks-check
+          /tmp/host-pool-acks-check
       - name: Check pipelined input ownership
         run: |
           g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=2 -DFHERMA_SPIN_COPY=0 tests/input_pipeline.cpp -o /tmp/input-pipeline-check
