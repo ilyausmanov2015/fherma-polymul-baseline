@@ -1,3 +1,6 @@
+#ifndef FHERMA_PIPELINE_INPUT
+#define FHERMA_PIPELINE_INPUT 4
+#endif
 #ifndef FHERMA_PREFAULT_OUTPUT
 #define FHERMA_PREFAULT_OUTPUT 1
 #endif
@@ -63,7 +66,7 @@
 #define FHERMA_STREAM_COPY 1
 #endif
 #ifndef FHERMA_COPY_THREADS
-#define FHERMA_COPY_THREADS 16
+#define FHERMA_COPY_THREADS 8
 #endif
 #ifndef FHERMA_PARALLEL_OUTPUT
 #define FHERMA_PARALLEL_OUTPUT 1
@@ -82,6 +85,7 @@
 #include <cuda_runtime.h>
 #include "host_affinity.h"
 #include "host_copy_pool.h"
+#include "input_pipeline.h"
 #include <memory>
 #include <cstdio>
 #include <cstring>
@@ -548,7 +552,9 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"graph stream");
     check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"begin capture");
     size_t bytes=size_t(s->n)*L*4;
+#if FHERMA_PIPELINE_INPUT<=1
     check(cudaMemcpyAsync(s->input,s->host_input,2*bytes,cudaMemcpyHostToDevice,s->stream),"capture H2D");
+#endif
     launch_ntt(*s,s->stream);
 #if !FHERMA_DIRECT_OUTPUT
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture D2H");
@@ -566,11 +572,19 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     auto& s=*static_cast<State*>(opaque); size_t words=size_t(s.n)*L, bytes=words*4;
     if(in.a.data.size()!=words || in.b.data.size()!=words) throw std::runtime_error("input size");
 #if FHERMA_GRAPH
+    try {
 #if FHERMA_HOST_PROFILE
     using HostClock=std::chrono::steady_clock;
     auto pack_start=HostClock::now();
 #endif
-#if FHERMA_PARALLEL_COPY
+#if FHERMA_PIPELINE_INPUT>1
+    static_assert(FHERMA_PARALLEL_COPY,"input pipeline needs the persistent copy pool");
+    copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,in.a.data.data(),in.b.data.data(),words,
+        [&](size_t begin,const uint32_t* a,const uint32_t* b,size_t count) {
+            check(cudaMemcpyAsync(s.input+begin,a,count*4,cudaMemcpyHostToDevice,s.stream),"pipeline A H2D");
+            check(cudaMemcpyAsync(s.input+words+begin,b,count*4,cudaMemcpyHostToDevice,s.stream),"pipeline B H2D");
+        });
+#elif FHERMA_PARALLEL_COPY
     s.copy.inputs(s.host_input,in.a.data.data(),in.b.data.data(),bytes);
 #else
     std::memcpy(s.host_input,in.a.data.data(),bytes);
@@ -642,6 +656,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #endif
 #endif
     return out;
+    } catch(...) { cudaStreamSynchronize(s.stream); throw; }
 #else
     mark(s,0);
 #if FHERMA_PINNED
