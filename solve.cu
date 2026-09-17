@@ -1,3 +1,6 @@
+#ifndef FHERMA_PIPELINE_OUTPUT
+#define FHERMA_PIPELINE_OUTPUT 4
+#endif
 #ifndef FHERMA_PIPELINE_INPUT
 #define FHERMA_PIPELINE_INPUT 4
 #endif
@@ -258,6 +261,9 @@ struct State {
 #if FHERMA_GRAPH
     cudaStream_t stream=nullptr;
     cudaGraphExec_t graph=nullptr;
+#if FHERMA_PIPELINE_OUTPUT>1
+    cudaEvent_t output_ready[FHERMA_PIPELINE_OUTPUT]{};
+#endif
 #endif
     uint32_t n=0, logn=0;
     uint32_t *q=nullptr,*roots=nullptr,*twist=nullptr,*inv_twist=nullptr,*scale=nullptr;
@@ -274,6 +280,9 @@ struct State {
 #if FHERMA_GRAPH
         if(graph) cudaGraphExecDestroy(graph);
         if(stream) cudaStreamDestroy(stream);
+#if FHERMA_PIPELINE_OUTPUT>1
+        for(auto event:output_ready) if(event) cudaEventDestroy(event);
+#endif
 #endif
         cudaFree(q); cudaFree(roots); cudaFree(twist); cudaFree(inv_twist);
         cudaFree(scale); cudaFree(input); cudaFree(ab); cudaFree(c);
@@ -549,6 +558,12 @@ void* fherma_init(const fherma::Point& p) {
 #endif
 #if FHERMA_GRAPH
     static_assert(FHERMA_PINNED && !FHERMA_PROFILE && !FHERMA_REGISTER_INPUTS,"graph uses fixed pinned buffers without diagnostic events");
+#if FHERMA_PIPELINE_OUTPUT>1
+    static_assert(!FHERMA_DIRECT_OUTPUT && FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT,
+                  "output pipeline requires staged parallel output");
+    static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments must fit the smallest supported point");
+    for(auto& event:s->output_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"output segment event");
+#endif
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"graph stream");
     check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"begin capture");
     size_t bytes=size_t(s->n)*L*4;
@@ -556,7 +571,7 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaMemcpyAsync(s->input,s->host_input,2*bytes,cudaMemcpyHostToDevice,s->stream),"capture H2D");
 #endif
     launch_ntt(*s,s->stream);
-#if !FHERMA_DIRECT_OUTPUT
+#if !FHERMA_DIRECT_OUTPUT && FHERMA_PIPELINE_OUTPUT<=1
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture D2H");
 #endif
     cudaGraph_t graph=nullptr;
@@ -628,6 +643,13 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #endif
 #else
     check(cudaGraphLaunch(s.graph,s.stream),"execute graph");
+#if FHERMA_PIPELINE_OUTPUT>1
+    for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+        size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
+        check(cudaMemcpyAsync(s.host_output+begin,s.input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s.stream),"pipeline D2H");
+        check(cudaEventRecord(s.output_ready[part],s.stream),"record output segment ready");
+    }
+#endif
 #if FHERMA_HOST_PROFILE
     enqueued=HostClock::now();
 #endif
@@ -639,11 +661,21 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #if FHERMA_HOST_PROFILE
     prepared=HostClock::now();
 #endif
+#if FHERMA_PIPELINE_OUTPUT>1
+    check(cudaEventSynchronize(s.output_ready[0]),"first output segment ready");
+#else
     check(cudaStreamSynchronize(s.stream),"graph result ready");
+#endif
 #if FHERMA_HOST_PROFILE
     synced=HostClock::now();
 #endif
-#if FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT
+#if FHERMA_PIPELINE_OUTPUT>1
+    for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+        check(cudaEventSynchronize(s.output_ready[part]),"output segment ready");
+        size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
+        s.copy.output(out.c.data.data()+begin,s.host_output+begin,(end-begin)*4);
+    }
+#elif FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT
     s.copy.output(out.c.data.data(),s.host_output,bytes);
 #else
     out.c.data.assign(s.host_output,s.host_output+words);
