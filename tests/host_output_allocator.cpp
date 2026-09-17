@@ -8,8 +8,14 @@ int main() {
     std::vector<std::vector<uint32_t>> retained;
     for(unsigned trial=0;trial<100;++trial) {
         std::vector<uint32_t> output;
+        size_t words=trial%2 ? 917504 : trial*19;
+        if(trial%4) {
+            output.reserve(words);
+            auto* storage=reinterpret_cast<char*>(output.data());
+            for(size_t byte=0;byte<words*4;byte+=4096) storage[byte]=char(0x7f);
+        }
         {
-            HostOutputAllocator::Work work(allocator,output,trial%2 ? 917504 : trial*19);
+            HostOutputAllocator::Work work(allocator,output,words);
             if(trial%3) work.wait(); // Other iterations exercise the RAII join.
         }
         assert(std::all_of(output.begin(),output.end(),[](auto x) {return x==0;}));

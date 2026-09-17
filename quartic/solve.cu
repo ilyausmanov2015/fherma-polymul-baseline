@@ -1,5 +1,8 @@
+#ifndef FHERMA_ASYNC_OUTPUT_PREFAULT
+#define FHERMA_ASYNC_OUTPUT_PREFAULT 1
+#endif
 #ifndef FHERMA_OUTPUT_SIGNAL
-#define FHERMA_OUTPUT_SIGNAL 1
+#define FHERMA_OUTPUT_SIGNAL 0
 #endif
 #ifndef FHERMA_FLUSH_OUTPUT_SOURCE
 #define FHERMA_FLUSH_OUTPUT_SOURCE 0
@@ -11,7 +14,7 @@
 #define FHERMA_INPUT_WORKERS_ONLY 0
 #endif
 #ifndef FHERMA_ASYNC_OUTPUT_ALLOC
-#define FHERMA_ASYNC_OUTPUT_ALLOC 0
+#define FHERMA_ASYNC_OUTPUT_ALLOC 1
 #endif
 #ifndef FHERMA_CRT_LIMB_SUMS
 #define FHERMA_CRT_LIMB_SUMS 0
@@ -1163,6 +1166,13 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
     fherma::Outputs output;output.c.shape={s.n,quartic::AbiWords};
 #if FHERMA_ASYNC_OUTPUT_ALLOC
+#if FHERMA_ASYNC_OUTPUT_PREFAULT
+    // Allocate and fault pages with the pool before it starts packing input.
+    // The dedicated worker then only initializes this fresh vector's elements,
+    // concurrently with CPU packing and GPU submission, inside this run.
+    output.c.data.reserve(words);
+    s.copy.prefault(output.c.data.data(),bytes);
+#endif
     HostOutputAllocator::Work allocation_task(s.output_allocator,output.c.data,words);
 #endif
     try {
