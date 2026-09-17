@@ -14,7 +14,7 @@
 #define FHERMA_SPECIAL_ADD_SUB 0
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 1
+#define FHERMA_HOST_PROFILE 0
 #endif
 #ifndef FHERMA_FUSED_TAIL
 #define FHERMA_FUSED_TAIL 1
@@ -29,7 +29,7 @@
 #define FHERMA_DIRECT_OUTPUT 0
 #endif
 #ifndef FHERMA_GRAPH
-#define FHERMA_GRAPH 1
+#define FHERMA_GRAPH 0
 #endif
 #ifndef FHERMA_MONTGOMERY
 #define FHERMA_MONTGOMERY 0
@@ -38,7 +38,7 @@
 #define FHERMA_SOA 1
 #endif
 #ifndef FHERMA_PROFILE
-#define FHERMA_PROFILE 0
+#define FHERMA_PROFILE 1
 #endif
 
 #ifndef FHERMA_TPI
