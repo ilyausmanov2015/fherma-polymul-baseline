@@ -8,6 +8,7 @@
 #include <coroutine>
 #include <exception>
 #include <vector>
+#include <cassert>
 #ifndef FHERMA_TPI
 #define FHERMA_TPI 1
 #endif
@@ -16,6 +17,21 @@
 #define __shared__ static
 struct dim3 { unsigned x,y,z; dim3(unsigned x_=1,unsigned y_=1,unsigned z_=1):x(x_),y(y_),z(z_){} };
 inline dim3 blockIdx,blockDim,threadIdx;
+// All participating lanes yield before reading. Alternating slots prevent the
+// next shuffle from overwriting values that later lanes have not yet read.
+inline uint32_t shuffle_values[2][1024];
+inline unsigned shuffle_ordinals[1024];
+struct EmulatedShuffleXor {
+    uint32_t value; unsigned owner,peer,slot;
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<>) const noexcept { shuffle_values[slot][owner]=value; }
+    uint32_t await_resume() const noexcept { return shuffle_values[slot][peer]; }
+};
+inline EmulatedShuffleXor emulated_shuffle_xor(unsigned mask,uint32_t value,unsigned delta,unsigned width) {
+    assert(mask==0xffffffff && width<=32 && width && !(width&(width-1)) && delta<width);
+    unsigned owner=threadIdx.x;
+    return {value,owner,owner^delta,shuffle_ordinals[owner]++&1};
+}
 inline uint32_t __umulhi(uint32_t a,uint32_t b) { return uint32_t(uint64_t(a)*b>>32); }
 inline uint64_t __umul64hi(uint64_t a,uint64_t b) { return uint64_t((__uint128_t(a)*b)>>64); }
 inline unsigned __brev(unsigned x) {
@@ -39,6 +55,7 @@ template<class F> void emulate_launch(dim3 grid,dim3 threads,F f) {
     blockDim=threads;
     for(blockIdx.y=0;blockIdx.y<grid.y;++blockIdx.y)
         for(blockIdx.x=0;blockIdx.x<grid.x;++blockIdx.x) {
+            std::memset(shuffle_ordinals,0,sizeof(shuffle_ordinals));
             std::vector<EmulatedKernel> tasks;
             for(threadIdx.x=0;threadIdx.x<threads.x;threadIdx.x+=FHERMA_TPI) tasks.push_back(f());
             unsigned active=tasks.size();

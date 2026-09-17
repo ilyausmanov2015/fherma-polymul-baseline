@@ -1,3 +1,6 @@
+#ifndef FHERMA_SHUFFLE_TAIL
+#define FHERMA_SHUFFLE_TAIL 1
+#endif
 #ifndef FHERMA_FUSED_PRODUCT
 #define FHERMA_FUSED_PRODUCT 1
 #endif
@@ -321,6 +324,24 @@ __global__ void fused_tail_rns(const uint32_t* source,uint32_t* destination,cons
     __syncthreads();
     unsigned column=column_base+t/(TailRows/2),k=t%(TailRows/2),offset=(t/(TailRows/2))*(TailRows+1);
     uint32_t p=mods[prime_i].p;
+#if FHERMA_SHUFFLE_TAIL
+    uint32_t u=tile[offset+2*k];
+    uint32_t v=shoup(tile[offset+2*k+1],tables[column],p);
+    uint32_t lower=add_mod(u,v,p),upper=sub_mod(u,v,p);
+    #pragma unroll
+    for(unsigned half=2;half<TailRows;half*=2) {
+        // Redistribute the preceding butterfly pairs entirely in registers.
+        uint32_t peer_lower=__shfl_xor_sync(0xffffffff,lower,half/2,TailRows/2);
+        uint32_t peer_upper=__shfl_xor_sync(0xffffffff,upper,half/2,TailRows/2);
+        u=(k&(half/2)) ? peer_upper : lower;
+        v=(k&(half/2)) ? upper : peer_lower;
+        unsigned j=k&(half-1);
+        v=shoup(v,tables[Tile*(half-1)+column*half+j],p);
+        lower=add_mod(u,v,p);upper=sub_mod(u,v,p);
+    }
+    unsigned output=(t/(TailRows/2))*TailRows+k;
+    destination[output]=lower;destination[output+TailRows/2]=upper;
+#else
     for(unsigned half=1;half<TailRows;half*=2) {
         unsigned j=k&(half-1),i=offset+2*(k-j)+j;
         uint32_t u=tile[i],v=shoup(tile[i+half],tables[Tile*(half-1)+column*half+j],p);
@@ -328,6 +349,7 @@ __global__ void fused_tail_rns(const uint32_t* source,uint32_t* destination,cons
         __syncthreads();
     }
     destination[2*t]=tile[offset+2*k];destination[2*t+1]=tile[offset+2*k+1];
+#endif
 }
 __device__ unsigned natural_index(unsigned i,unsigned n) {
     return FHERMA_RNS_TAIL && n==32768 ? ((i&(TailRows-1))*Tile+i/TailRows) : i;

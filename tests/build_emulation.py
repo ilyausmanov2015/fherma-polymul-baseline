@@ -31,6 +31,7 @@ for m in reversed(matches):
         end += 1
     body=source[start:end-1].replace('return;', 'co_return;')
     body=body.replace('__syncthreads();','co_await std::suspend_always{};')
+    body=body.replace('__shfl_xor_sync(', 'co_await emulated_shuffle_xor(')
     decl=source[m.start():start].replace('__global__ void','EmulatedKernel')
     source=source[:m.start()]+decl+body+'co_return;\n}'+source[end:]
 source, count = re.subn(
