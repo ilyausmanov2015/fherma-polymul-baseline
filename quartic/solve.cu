@@ -1,5 +1,8 @@
+#ifndef FHERMA_OUTPUT_SPARE
+#define FHERMA_OUTPUT_SPARE 1
+#endif
 #ifndef FHERMA_OUTPUT_APPEND
-#define FHERMA_OUTPUT_APPEND 1
+#define FHERMA_OUTPUT_APPEND 0
 #endif
 #ifndef FHERMA_PAIRED_INPUT
 #define FHERMA_PAIRED_INPUT 1
@@ -590,6 +593,9 @@ void check(cudaError_t status,const char* operation) {
 }
 struct State {
     HostCopyPool copy;
+    // Only zero-initialized storage is retained. Every run allocates a fresh
+    // replacement inside its timed call; returned result ownership is unique.
+    std::vector<uint32_t> spare_output;
     unsigned n=0,logn=0;
     bool overlap_input=false,lazy_ntt=false;
     uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
@@ -756,6 +762,7 @@ void* fherma_init(const fherma::Point& p) {
                   "profile arithmetic separately from overlapped host transfers");
     static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments fit the smallest point");
     static_assert(!FHERMA_MAPPED_OUTPUT || FHERMA_PIPELINE_OUTPUT==1,"mapped output waits for the complete CRT kernel");
+    static_assert(!(FHERMA_OUTPUT_APPEND && FHERMA_OUTPUT_SPARE),"choose one output construction experiment");
     pin_near_gpu();
 #if FHERMA_HOST_PROFILE && defined(__linux__)
     std::string thp_policy;
@@ -905,6 +912,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     auto pack_end=std::chrono::steady_clock::now();
 #endif
     fherma::Outputs output;output.c.shape={s.n,quartic::AbiWords};
+    if(FHERMA_OUTPUT_SPARE) output.c.data.swap(s.spare_output);
 #if FHERMA_GRAPH
         check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
 #if FHERMA_PIPELINE_OUTPUT>1
@@ -925,16 +933,23 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_HOST_PROFILE
         auto alloc_start=std::chrono::steady_clock::now();
 #endif
-        output.c.data.reserve(words);
-        if(FHERMA_HUGE_OUTPUT) advise_output_hugepages(output.c.data.data(),bytes);
+        auto& allocation=FHERMA_OUTPUT_SPARE ? s.spare_output : output.c.data;
+        allocation.reserve(words);
+        if(FHERMA_HUGE_OUTPUT) advise_output_hugepages(allocation.data(),bytes);
 #if FHERMA_HOST_PROFILE
         auto reserved_at=std::chrono::steady_clock::now();
 #endif
-        s.copy.prefault(output.c.data.data(),bytes);
+        s.copy.prefault(allocation.data(),bytes);
 #if FHERMA_HOST_PROFILE
         auto faulted_at=std::chrono::steady_clock::now();
 #endif
-        if(!FHERMA_OUTPUT_APPEND) output.c.data.resize(words);
+        if(!FHERMA_OUTPUT_APPEND) allocation.resize(words);
+        // The first call pays for both its own storage and the next empty one.
+        if(FHERMA_OUTPUT_SPARE && output.c.data.size()!=words) {
+            output.c.data.reserve(words);
+            s.copy.prefault(output.c.data.data(),bytes);
+            output.c.data.resize(words);
+        }
 #if FHERMA_HOST_PROFILE
         auto alloc_end=std::chrono::steady_clock::now();
 #endif
