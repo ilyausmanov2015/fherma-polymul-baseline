@@ -1,3 +1,6 @@
+#ifndef FHERMA_RNS_TILED_PREPARE
+#define FHERMA_RNS_TILED_PREPARE 1
+#endif
 #ifndef FHERMA_INPUT_WC
 #define FHERMA_INPUT_WC 1
 #endif
@@ -106,6 +109,34 @@ __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* m
     }
     uint32_t value=shoup(add_mod(even,odd,modulus.p),twists[prime_i*n+i],modulus.p);
     ab[blockIdx.y*n+(__brev(i)>>(32-logn))]=value;
+}
+// For N=2^15, split the index into three groups of five bits. Fix the
+// middle group and transpose the outer groups through padded shared memory.
+// Both the coefficient reads and the bit-reversed residue writes now use
+// consecutive 32-word warp transactions.
+__global__ void prepare_tiled(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
+                              const Twiddle* twists,const Twiddle* powers,unsigned n) {
+    __shared__ uint32_t tile[32*33];
+    unsigned x=threadIdx.x&31,y0=threadIdx.x>>5;
+    unsigned prime_i=blockIdx.y%PrimeCount,poly=blockIdx.y/PrimeCount;
+    SmallMod modulus=mods[prime_i];
+    input+=poly*n*AbiWords;ab+=blockIdx.y*n;
+    #pragma unroll 1
+    for(unsigned y=y0;y<32;y+=8) {
+        unsigned i=(y<<10)+(blockIdx.x<<5)+x;
+        uint32_t even=0,odd=0;
+        #pragma unroll
+        for(unsigned limb=0;limb<AbiWords;++limb) {
+            uint32_t term=shoup(input[limb*n+i],powers[prime_i*AbiWords+limb],modulus.p);
+            if(limb&1) odd=add_mod(odd,term,modulus.p);else even=add_mod(even,term,modulus.p);
+        }
+        tile[y*33+x]=shoup(add_mod(even,odd,modulus.p),twists[prime_i*n+i],modulus.p);
+    }
+    __syncthreads();
+    unsigned reverse_x=__brev(x)>>27,reverse_middle=__brev(blockIdx.x)>>27;
+    #pragma unroll
+    for(unsigned y=y0;y<32;y+=8)
+        ab[(y<<10)+(reverse_middle<<5)+x]=tile[reverse_x*33+(__brev(y)>>27)];
 }
 // Four warps reuse 32 complete coefficients. Padding to 29 words avoids
 // shared-memory bank conflicts when a warp reads the same limb of 32 inputs.
@@ -375,7 +406,10 @@ void launch_rns(State& s,cudaStream_t stream=nullptr) {
     } else {
         dim3 abi_tiles((s.n+31)/32,2);
         transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n);
-        prepare_rns<<<full,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn);
+        if(FHERMA_RNS_TILED_PREPARE && s.n==32768) {
+            dim3 prepare_tiles(32,2*PrimeCount);
+            prepare_tiled<<<prepare_tiles,256,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.n);
+        } else prepare_rns<<<full,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn);
     }
     mark(s,2,stream);
     unsigned first=1;
