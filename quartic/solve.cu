@@ -1,5 +1,8 @@
+#ifndef FHERMA_ASYNC_OUTPUT_ALLOC
+#define FHERMA_ASYNC_OUTPUT_ALLOC 1
+#endif
 #ifndef FHERMA_CRT_LIMB_SUMS
-#define FHERMA_CRT_LIMB_SUMS 1
+#define FHERMA_CRT_LIMB_SUMS 0
 #endif
 #ifndef FHERMA_NATURAL_INVERSE
 #define FHERMA_NATURAL_INVERSE 0
@@ -141,6 +144,7 @@
 #include "host_affinity.h"
 #include "host_copy_pool.h"
 #include "host_output_memory.h"
+#include "host_output_allocator.h"
 #include "input_pipeline.h"
 #include <memory>
 #include <cstring>
@@ -757,6 +761,10 @@ void check(cudaError_t status,const char* operation) {
     if(status!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(status));
 }
 struct State {
+#if FHERMA_ASYNC_OUTPUT_ALLOC
+    // Capture the allowed NUMA mask before HostCopyPool pins the caller.
+    HostOutputAllocator output_allocator;
+#endif
     HostCopyPool copy;
     // Only zero-initialized storage is retained. Every run allocates a fresh
     // replacement inside its timed call; returned result ownership is unique.
@@ -978,6 +986,7 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(!FHERMA_CRT_PIPELINE || FHERMA_PIPELINE_INPUT>1,"CRT pipeline reuses the input transfer stream");
     static_assert(!FHERMA_CRT_PIPELINE || (FHERMA_NATURAL_INVERSE && FHERMA_OUTPUT_GRAPH && FHERMA_OVERLAP_PREPARE && !FHERMA_MAPPED_OUTPUT),"CRT pipeline requires natural graph output");
     static_assert(!FHERMA_CRT_PIPELINE || (FHERMA_PIPELINE_OUTPUT>1 && FHERMA_PIPELINE_OUTPUT%(FHERMA_CRT_PIPELINE ? FHERMA_CRT_PIPELINE : 1)==0),"whole DMA parts per CRT chunk");
+    static_assert(!FHERMA_ASYNC_OUTPUT_ALLOC || !(FHERMA_OUTPUT_SPARE || FHERMA_OUTPUT_APPEND || FHERMA_HUGE_OUTPUT),"async allocation owns ordinary fresh vectors");
     pin_near_gpu();
 #if FHERMA_HOST_PROFILE && defined(__linux__)
     std::string thp_policy;
@@ -1120,6 +1129,10 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     auto& s=*static_cast<State*>(opaque);
     size_t words=size_t(s.n)*quartic::AbiWords,bytes=words*4;
     if(input.a.data.size()!=words || input.b.data.size()!=words) throw std::runtime_error("RNS input size");
+    fherma::Outputs output;output.c.shape={s.n,quartic::AbiWords};
+#if FHERMA_ASYNC_OUTPUT_ALLOC
+    HostOutputAllocator::Work allocation_task(s.output_allocator,output.c.data,words);
+#endif
     try {
 #if FHERMA_PROFILE || FHERMA_HOST_PROFILE
     auto pack_start=std::chrono::steady_clock::now();
@@ -1156,7 +1169,6 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_PROFILE || FHERMA_HOST_PROFILE
     auto pack_end=std::chrono::steady_clock::now();
 #endif
-    fherma::Outputs output;output.c.shape={s.n,quartic::AbiWords};
     if(FHERMA_OUTPUT_SPARE) output.c.data.swap(s.spare_output);
 #if FHERMA_GRAPH
         check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
@@ -1178,6 +1190,12 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_HOST_PROFILE
         auto alloc_start=std::chrono::steady_clock::now();
 #endif
+#if FHERMA_ASYNC_OUTPUT_ALLOC
+        allocation_task.wait();
+#if FHERMA_HOST_PROFILE
+        auto reserved_at=std::chrono::steady_clock::now(),faulted_at=reserved_at;
+#endif
+#else
         auto& allocation=FHERMA_OUTPUT_SPARE ? s.spare_output : output.c.data;
         allocation.reserve(words);
         if(FHERMA_HUGE_OUTPUT) advise_output_hugepages(allocation.data(),bytes);
@@ -1195,6 +1213,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
             s.copy.prefault(output.c.data.data(),bytes);
             output.c.data.resize(words);
         }
+#endif
 #if FHERMA_HOST_PROFILE
         auto alloc_end=std::chrono::steady_clock::now();
 #endif

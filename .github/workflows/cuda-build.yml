@@ -31,6 +31,10 @@ jobs:
         run: |
           g++ -O2 -std=c++17 -I. tests/limb_accumulator.cpp -lgmpxx -lgmp -o /tmp/limb-accumulator-check
           /tmp/limb-accumulator-check
+      - name: Check asynchronous output ownership and exceptions
+        run: |
+          g++ -O2 -std=c++17 -pthread -I. tests/host_output_allocator.cpp -o /tmp/output-allocator-check
+          /tmp/output-allocator-check
       - name: Check persistent copy handoff
         run: |
           for mode in 0 1; do
