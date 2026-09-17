@@ -1,8 +1,11 @@
+#ifndef FHERMA_LAZY_PREPARE
+#define FHERMA_LAZY_PREPARE 1
+#endif
 #ifndef FHERMA_UMWAIT
-#define FHERMA_UMWAIT 1
+#define FHERMA_UMWAIT 0
 #endif
 #ifndef FHERMA_FUSED_TILE
-#define FHERMA_FUSED_TILE 0
+#define FHERMA_FUSED_TILE 1
 #endif
 #ifndef FHERMA_CRT_VECTOR_OUTPUT
 #define FHERMA_CRT_VECTOR_OUTPUT 0
@@ -65,7 +68,7 @@
 #define FHERMA_HARVEY 1
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 1
+#define FHERMA_OUTPUT_GRAPH 0
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -89,7 +92,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 1
+#define FHERMA_HOST_PROFILE 0
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -250,7 +253,7 @@ __global__ void transpose_inputs(const uint32_t* input,uint32_t* output,unsigned
     for(unsigned dy=0;dy<32;dy+=8)
         if(y+dy<AbiWords && base+x<end) output[(y+dy)*n+base+x]=tile[x*33+y+dy];
 }
-__device__ inline void prepare_coefficient(const uint32_t* input,unsigned stride,uint32_t* ab,
+template<bool Lazy> __device__ inline void prepare_coefficient(const uint32_t* input,unsigned stride,uint32_t* ab,
     const Twiddle* twists,const Twiddle* powers,const Roots* roots,unsigned n,unsigned logn,
     unsigned i,unsigned pi,unsigned poly,uint32_t p,bool natural) {
     uint32_t z[4];
@@ -263,10 +266,12 @@ __device__ inline void prepare_coefficient(const uint32_t* input,unsigned stride
             uint32_t word=input[(base+limb)*stride]>>bits;
             if(bits) word|=input[(base+limb+1)*stride]<<(32-bits);
             if(limb==PartWords-1) word&=(uint32_t(1)<<25)-1;
-            uint32_t term=shoup(word,powers[pi*PartWords+limb],p);
-            if(limb&1) odd=add_mod(odd,term,p);else even=add_mod(even,term,p);
+            uint32_t term=ntt_shoup<Lazy>(word,powers[pi*PartWords+limb],p);
+            if(limb&1) odd=ntt_add<Lazy>(odd,term,p);else even=ntt_add<Lazy>(even,term,p);
         }
-        z[component]=shoup(add_mod(even,odd,p),roots[pi].powers[component],p);
+        // For p<2^30 the two sums stay in [0,2p), and their addition cannot
+        // overflow uint32. This final Shoup multiply returns canonical z.
+        z[component]=shoup(ntt_add<Lazy>(even,odd,p),roots[pi].powers[component],p);
     }
     uint32_t u=add_mod(z[0],z[2],p),v=sub_mod(z[0],z[2],p);
     uint32_t sum=add_mod(z[1],z[3],p),difference=shoup(sub_mod(z[1],z[3],p),roots[pi].i,p);
@@ -276,18 +281,18 @@ __device__ inline void prepare_coefficient(const uint32_t* input,unsigned stride
     for(unsigned channel=0;channel<4;++channel)
         ab[(poly*PrimeCount+channel*ModCount+pi)*n+output_i]=FHERMA_HARVEY && n==32768 ? mixed[channel] : shoup(mixed[channel],twists[pi*n+i],p);
 }
-__global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
+template<bool Lazy> __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
                              const Twiddle* twists,const Twiddle* powers,const Roots* roots,unsigned n,unsigned logn,
                              unsigned begin=0,unsigned count=0,bool natural=false) {
     unsigned i=begin+blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=(count ? begin+count : n)) return;
     unsigned pi=blockIdx.y%ModCount,poly=blockIdx.y/ModCount;
-    prepare_coefficient(input+poly*n*AbiWords+i,n,ab,twists,powers,roots,n,logn,i,pi,poly,mods[pi].p,natural);
+    prepare_coefficient<Lazy && FHERMA_LAZY_PREPARE>(input+poly*n*AbiWords+i,n,ab,twists,powers,roots,n,logn,i,pi,poly,mods[pi].p,natural);
 }
 constexpr unsigned PreparePrimes=FHERMA_PREPARE_PRIMES,PrepareThreads=32*PreparePrimes;
 static_assert(PreparePrimes==4 || PreparePrimes==8 || PreparePrimes==16,"group 4, 8 or 16 primes");
 // Warps share one AoS tile, each warp evaluating a different prime.
-__global__ void prepare_grouped(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
+template<bool Lazy> __global__ void prepare_grouped(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
                              const Twiddle* twists,const Twiddle* powers,const Roots* roots,unsigned n,unsigned logn,
                              unsigned begin=0,unsigned count=0,bool natural=false,bool packed=false) {
     __shared__ uint32_t tile[32*29];
@@ -303,7 +308,7 @@ __global__ void prepare_grouped(const uint32_t* input,uint32_t* ab,const SmallMo
     __syncthreads();
     unsigned i=base+lane;
     if(i>=end) return;
-    prepare_coefficient(tile+lane*29,1,ab,twists,powers,roots,n,logn,i,pi,poly,mods[pi].p,natural);
+    prepare_coefficient<Lazy && FHERMA_LAZY_PREPARE>(tile+lane*29,1,ab,twists,powers,roots,n,logn,i,pi,poly,mods[pi].p,natural);
 }
 // The chunk converter writes natural order while H2D is still active.
 // Permute only after all chunks are ready, using coalesced loads and stores.
@@ -1071,19 +1076,23 @@ template<class T> void upload(T*& destination,const std::vector<T>& source) {
     check(cudaMalloc(&destination,source.size()*sizeof(T)),"allocate parameter table");
     check(cudaMemcpy(destination,source.data(),source.size()*sizeof(T),cudaMemcpyHostToDevice),"upload parameter table");
 }
-void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stream=nullptr) {
+template<bool Lazy> void launch_input_chunk_impl(State& s,unsigned begin,unsigned count,cudaStream_t stream) {
     dim3 abi_tiles((count+31)/32,2),residues((count+127)/128,2*ModCount);
     bool paired=FHERMA_MAPPED_INPUT || FHERMA_PAIRED_INPUT;
     const uint32_t* source=FHERMA_MAPPED_INPUT ? s.mapped_input : s.input;
     if(paired) source+=size_t(2)*begin*AbiWords;
     if(FHERMA_RNS_GROUPED) {
         dim3 groups((count+31)/32,2*(ModCount/PreparePrimes));
-        prepare_grouped<<<groups,PrepareThreads,0,stream>>>(source,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true,paired);
+        prepare_grouped<Lazy><<<groups,PrepareThreads,0,stream>>>(source,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true,paired);
     } else {
     transpose_inputs<<<abi_tiles,256,0,stream>>>(source,s.input_soa,s.n,begin,count,paired);
-    prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true);
+    prepare_rns<Lazy><<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true);
     }
     check(cudaGetLastError(),"RNS input chunk kernels");
+}
+void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stream=nullptr) {
+    if(s.lazy_ntt) launch_input_chunk_impl<true>(s,begin,count,stream);
+    else launch_input_chunk_impl<false>(s,begin,count,stream);
 }
 template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
@@ -1100,10 +1109,10 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
         dim3 abi_tiles((s.n+31)/32,2),residues((s.n+127)/128,2*ModCount);
         if(FHERMA_RNS_GROUPED) {
             dim3 groups((s.n+31)/32,2*(ModCount/PreparePrimes));
-            prepare_grouped<<<groups,PrepareThreads,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
+            prepare_grouped<Lazy><<<groups,PrepareThreads,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
         } else {
         transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n);
-        prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
+        prepare_rns<Lazy><<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
         }
     }
     mark(s,2,stream);
