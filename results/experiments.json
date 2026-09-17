@@ -2682,5 +2682,192 @@
         "copy": 156.462
       }
     ]
+  },
+  {
+    "id": "6aabe5b4e3bdd1a5530b9faf",
+    "status": "finished",
+    "cases": 20,
+    "passed": 20,
+    "failure": null,
+    "init_s": 0.518328533,
+    "started_at": "2026-09-17T13:05:57.200Z",
+    "finished_at": "2026-09-17T13:08:38.666Z",
+    "commit": "20f262efe701d58cbfb723991bd1b5e7e4044d35",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 20,
+        "seeds": 20,
+        "seconds": {
+          "min": 0.000654582,
+          "median": 0.000701431,
+          "mean": 0.0006962929499999999,
+          "max": 0.000751281
+        }
+      }
+    ],
+    "case_errors": [],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [],
+    "host_staged_us": [
+      {
+        "pack": 397.942,
+        "enqueue": 64.966,
+        "allocate": 768.982,
+        "wait": 9.114,
+        "copy": 141.881
+      },
+      {
+        "pack": 186.283,
+        "enqueue": 25.799,
+        "allocate": 168.214,
+        "wait": 132.17,
+        "copy": 170.626
+      },
+      {
+        "pack": 215.688,
+        "enqueue": 27.528,
+        "allocate": 173.372,
+        "wait": 117.25,
+        "copy": 187.016
+      },
+      {
+        "pack": 202.922,
+        "enqueue": 25.366,
+        "allocate": 198.753,
+        "wait": 88.901,
+        "copy": 189.14
+      },
+      {
+        "pack": 193.58,
+        "enqueue": 24.274,
+        "allocate": 159.644,
+        "wait": 125.183,
+        "copy": 192.479
+      },
+      {
+        "pack": 204.497,
+        "enqueue": 22.198,
+        "allocate": 170.466,
+        "wait": 119.32,
+        "copy": 177.912
+      },
+      {
+        "pack": 217.545,
+        "enqueue": 25.521,
+        "allocate": 177.286,
+        "wait": 111.396,
+        "copy": 208.597
+      },
+      {
+        "pack": 186.797,
+        "enqueue": 22.98,
+        "allocate": 169.114,
+        "wait": 108.239,
+        "copy": 157.416
+      },
+      {
+        "pack": 192.335,
+        "enqueue": 20.743,
+        "allocate": 160.551,
+        "wait": 120.593,
+        "copy": 153.797
+      },
+      {
+        "pack": 193.581,
+        "enqueue": 23.988,
+        "allocate": 162.231,
+        "wait": 125.08,
+        "copy": 194.796
+      },
+      {
+        "pack": 214.428,
+        "enqueue": 21.927,
+        "allocate": 143.21,
+        "wait": 153.963,
+        "copy": 158.541
+      },
+      {
+        "pack": 193.988,
+        "enqueue": 23.26,
+        "allocate": 161.316,
+        "wait": 125.813,
+        "copy": 213.8
+      },
+      {
+        "pack": 207.697,
+        "enqueue": 26.053,
+        "allocate": 164.253,
+        "wait": 124.58,
+        "copy": 214.961
+      },
+      {
+        "pack": 204.344,
+        "enqueue": 25.401,
+        "allocate": 168.697,
+        "wait": 121.957,
+        "copy": 199.456
+      },
+      {
+        "pack": 177.113,
+        "enqueue": 22.38,
+        "allocate": 158.367,
+        "wait": 133.082,
+        "copy": 167.476
+      },
+      {
+        "pack": 183.789,
+        "enqueue": 22.886,
+        "allocate": 154.072,
+        "wait": 126.887,
+        "copy": 158.031
+      },
+      {
+        "pack": 187.738,
+        "enqueue": 22.444,
+        "allocate": 159.211,
+        "wait": 119.659,
+        "copy": 155.554
+      },
+      {
+        "pack": 192.657,
+        "enqueue": 23.764,
+        "allocate": 199.206,
+        "wait": 90.881,
+        "copy": 181.637
+      },
+      {
+        "pack": 202.118,
+        "enqueue": 21.276,
+        "allocate": 152.628,
+        "wait": 136.732,
+        "copy": 176.32
+      },
+      {
+        "pack": 184.97,
+        "enqueue": 22.872,
+        "allocate": 161.479,
+        "wait": 117.538,
+        "copy": 162.334
+      },
+      {
+        "pack": 169.864,
+        "enqueue": 21.204,
+        "allocate": 140.162,
+        "wait": 147.518,
+        "copy": 165.346
+      },
+      {
+        "pack": 175.497,
+        "enqueue": 24.02,
+        "allocate": 148.445,
+        "wait": 138.517,
+        "copy": 169.677
+      }
+    ]
   }
 ]
