@@ -407,3 +407,26 @@ CUDA CI этих вариантов успешен; CPU GMP 0947008 — 9/9 N327
 f7c5658: новый persistent input job проверен CV/spin/full-worker/selective,
 ThreadSanitizer, output pipeline regression и GMP N32768 9/9.
 Четыре/восемь частей измеряются отдельно (f7c5658 / 2a262b5).
+
+
+## Проверки длительнее короткого набора, 20:33 МСК
+
+MOVDIR64B 54c2fcd: benchmark 20/20, медиана 400,1495 мкс,
+min 380,743, max 796,686, среднее 420,8955. Улучшение короткого
+результата 381,496 мкс не подтвердилось. Это benchmark, не новый
+конкурсный enter: в leaderboard остаётся 09dca35 / 386,7625 мкс.
+
+Persistent input f7c5658 (4 части): 3/3, 392,823 мкс.
+Persistent input 2a262b5 (8 частей): 3/3, 409,406 мкс.
+Поздний async resize e192a80 после input packing: 3/3, 547,907 мкс.
+Эти варианты не продвигаются. Все CUDA-сборки успешны.
+
+9aec57c проверяет mapped WC input с общей плиткой для всех 16 простых;
+он отличается от старого c7c4160 с отдельным transpose и невыровненными
+112-байтными строками загрузки. Адрес GPU получен явно через
+cudaHostGetDevicePointer; равенство host/device для WC не предполагается.
+CPU GMP N32768 9/9, CUDA CI успешен; GPU-результат ожидается.
+
+aa3bd16 — единый граф с input readiness flags; CPU fallback N1024 9/9,
+GPU и CUDA CI ожидаются. Протокол, CUDA-зависимости и разблокирование
+на ошибке описаны в research/INPUT_GRAPH_RU.md.
