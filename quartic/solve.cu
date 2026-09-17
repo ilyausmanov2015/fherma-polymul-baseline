@@ -1,8 +1,11 @@
+#ifndef FHERMA_CRT_VECTOR_OUTPUT
+#define FHERMA_CRT_VECTOR_OUTPUT 1
+#endif
 #ifndef FHERMA_CRT_OUTPUT_SIGNAL
-#define FHERMA_CRT_OUTPUT_SIGNAL 0
+#define FHERMA_CRT_OUTPUT_SIGNAL 1
 #endif
 #ifndef FHERMA_INPUT_GRAPH
-#define FHERMA_INPUT_GRAPH 1
+#define FHERMA_INPUT_GRAPH 0
 #endif
 #ifndef FHERMA_INPUT_GRAPH_EARLY
 #define FHERMA_INPUT_GRAPH_EARLY 0
@@ -41,7 +44,7 @@
 #define FHERMA_CRT_LIMB_SUMS 0
 #endif
 #ifndef FHERMA_NATURAL_INVERSE
-#define FHERMA_NATURAL_INVERSE 0
+#define FHERMA_NATURAL_INVERSE 1
 #endif
 #ifndef FHERMA_CRT_PIPELINE
 #define FHERMA_CRT_PIPELINE 0
@@ -80,7 +83,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 1
+#define FHERMA_HOST_PROFILE 0
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -128,7 +131,7 @@
 #define FHERMA_RNS_TILED_PREPARE 1
 #endif
 #ifndef FHERMA_INPUT_WC
-#define FHERMA_INPUT_WC 0
+#define FHERMA_INPUT_WC 1
 #endif
 #ifndef FHERMA_STREAM_OUTPUT
 #define FHERMA_STREAM_OUTPUT 0
@@ -170,7 +173,7 @@
 #define FHERMA_SPIN_COPY 1
 #endif
 #ifndef FHERMA_STREAM_COPY
-#define FHERMA_STREAM_COPY 0
+#define FHERMA_STREAM_COPY 1
 #endif
 #include "fherma.h"
 #include "quartic/host_setup.h"
@@ -796,9 +799,28 @@ template<bool Lazy> __global__ void reconstruct_rns(const uint32_t* residues,uin
         for(unsigned word=0;word<AbiWords;++word) partial[lane*29+word]=answer[word];
     }
     __syncthreads();
+    if(FHERMA_CRT_VECTOR_OUTPUT && FHERMA_NATURAL_INVERSE && n==32768) {
+        // Natural inverse makes the whole tile contiguous. Four words per
+        // lane reduce store instructions while preserving 16-byte alignment.
+        for(unsigned vector=threadIdx.x;vector<32*AbiWords/4;vector+=128) {
+            uint32_t values[4];
+            #pragma unroll
+            for(unsigned k=0;k<4;++k) {
+                unsigned word=vector*4+k;
+                values[k]=partial[(word/AbiWords)*29+word%AbiWords];
+            }
+            unsigned word=(begin+blockIdx.x*32)*AbiWords+vector*4;
+#ifdef __CUDACC__
+            reinterpret_cast<uint4*>(output+word)[0]=make_uint4(values[0],values[1],values[2],values[3]);
+#else
+            for(unsigned k=0;k<4;++k) output[word+k]=values[k];
+#endif
+        }
+    } else {
     for(unsigned word=threadIdx.x;word<32*AbiWords;word+=128) {
         unsigned coefficient=word/AbiWords,limb=word%AbiWords,index=begin+blockIdx.x*32+coefficient;
         if(index<n) output[natural_index(index,n)*AbiWords+limb]=partial[coefficient*29+limb];
+    }
     }
 #if defined(__CUDACC__) && FHERMA_CRT_OUTPUT_SIGNAL
     if(ready_flags) {
