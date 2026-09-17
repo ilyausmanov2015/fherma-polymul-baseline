@@ -1,5 +1,5 @@
 #ifndef FHERMA_SPIN_COPY
-#define FHERMA_SPIN_COPY 1
+#define FHERMA_SPIN_COPY 0
 #endif
 #ifndef FHERMA_DIRECT_OUTPUT
 #define FHERMA_DIRECT_OUTPUT 0
@@ -8,17 +8,17 @@
 #define FHERMA_GRAPH 1
 #endif
 #ifndef FHERMA_MONTGOMERY
-#define FHERMA_MONTGOMERY 0
+#define FHERMA_MONTGOMERY 1
 #endif
 #ifndef FHERMA_SOA
-#define FHERMA_SOA 1
+#define FHERMA_SOA 0
 #endif
 #ifndef FHERMA_PROFILE
 #define FHERMA_PROFILE 0
 #endif
 
 #ifndef FHERMA_TPI
-#define FHERMA_TPI 1
+#define FHERMA_TPI 4
 #endif
 #ifndef FHERMA_PINNED
 #define FHERMA_PINNED 1
