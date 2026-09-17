@@ -1,3 +1,9 @@
+#ifndef FHERMA_NATURAL_INVERSE
+#define FHERMA_NATURAL_INVERSE 1
+#endif
+#ifndef FHERMA_CRT_PIPELINE
+#define FHERMA_CRT_PIPELINE 4
+#endif
 #ifndef FHERMA_PREPARE_PRIMES
 #define FHERMA_PREPARE_PRIMES 4
 #endif
@@ -5,10 +11,10 @@
 #define FHERMA_HARVEY_BITS 3
 #endif
 #ifndef FHERMA_HARVEY
-#define FHERMA_HARVEY 0
+#define FHERMA_HARVEY 1
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 0
+#define FHERMA_OUTPUT_GRAPH 1
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -92,7 +98,7 @@
 #define FHERMA_PIPELINE_INPUT 4
 #endif
 #ifndef FHERMA_PIPELINE_OUTPUT
-#define FHERMA_PIPELINE_OUTPUT 16
+#define FHERMA_PIPELINE_OUTPUT 8
 #endif
 #ifndef FHERMA_RNS_RADIX4
 #define FHERMA_RNS_RADIX4 1
@@ -538,8 +544,18 @@ template<bool Inverse,bool Lazy> __global__ void harvey_tail(const uint32_t* sou
         lower=u;upper=v;
     }
     if constexpr(Inverse) {
-        unsigned output=column_base*TailRows+(t/(TailRows/2))*TailRows+k;
-        destination[output]=lower;destination[output+TailRows/2]=upper;
+        if constexpr(FHERMA_NATURAL_INVERSE) {
+            tile[offset+k]=lower;tile[offset+k+TailRows/2]=upper;
+            __syncthreads();
+            #pragma unroll
+            for(unsigned index=t;index<256;index+=128) {
+                unsigned row=index/TailColumns,column=index%TailColumns;
+                destination[row*Tile+column_base+column]=tile[column*(TailRows+1)+row];
+            }
+        } else {
+            unsigned output=column_base*TailRows+(t/(TailRows/2))*TailRows+k;
+            destination[output]=lower;destination[output+TailRows/2]=upper;
+        }
     } else {
         tile[offset+2*k]=lower;tile[offset+2*k+1]=upper;
         __syncthreads();
@@ -627,7 +643,7 @@ template<bool Lazy> __global__ void fused_tail_rns(const uint32_t* source,uint32
 #endif
 }
 __device__ unsigned natural_index(unsigned i,unsigned n) {
-    return FHERMA_RNS_TAIL && n==32768 ? ((i&(TailRows-1))*Tile+i/TailRows) : i;
+    return FHERMA_RNS_TAIL && !FHERMA_NATURAL_INVERSE && n==32768 ? ((i&(TailRows-1))*Tile+i/TailRows) : i;
 }
 __global__ void product_rns(const uint32_t* ab,uint32_t* c,const SmallMod* mods,unsigned n,unsigned logn) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
@@ -660,10 +676,10 @@ template<unsigned Component> __device__ Big fold_component(const Wide& magnitude
 }
 template<bool Lazy> __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const SmallMod* mods,
                                 const Twiddle* scales,const uint32_t* bases,const Roots* roots,
-                                const uint32_t* q_words,const uint32_t* product,unsigned n) {
+                                const uint32_t* q_words,const uint32_t* product,unsigned n,unsigned begin=0) {
     static_assert(CrtOutputs==32,"one warp per quartic component");
     __shared__ uint32_t partial[128*29];
-    unsigned lane=threadIdx.x&31,component=threadIdx.x/32,i=blockIdx.x*32+lane;
+    unsigned lane=threadIdx.x&31,component=threadIdx.x/32,i=begin+blockIdx.x*32+lane;
     Wide accumulator(uint32_t(0));uint64_t fraction=0;uint32_t alpha=0;
     #pragma unroll 1
     for(unsigned pi=0;i<n && pi<ModCount;++pi) {
@@ -719,7 +735,7 @@ template<bool Lazy> __global__ void reconstruct_rns(const uint32_t* residues,uin
     }
     __syncthreads();
     for(unsigned word=threadIdx.x;word<32*AbiWords;word+=128) {
-        unsigned coefficient=word/AbiWords,limb=word%AbiWords,index=blockIdx.x*32+coefficient;
+        unsigned coefficient=word/AbiWords,limb=word%AbiWords,index=begin+blockIdx.x*32+coefficient;
         if(index<n) output[natural_index(index,n)*AbiWords+limb]=partial[coefficient*29+limb];
     }
 }
@@ -741,6 +757,9 @@ struct State {
     cudaStream_t stream=nullptr;cudaGraphExec_t graph=nullptr;
     cudaStream_t transfer_stream=nullptr;
     cudaEvent_t input_ready[FHERMA_PIPELINE_INPUT]{};
+#if FHERMA_CRT_PIPELINE
+    cudaEvent_t crt_ready[FHERMA_CRT_PIPELINE]{},crt_join=nullptr;
+#endif
     cudaGraphExec_t prepare_graph[FHERMA_PIPELINE_INPUT]{};
 #if FHERMA_PIPELINE_OUTPUT>1
     cudaEvent_t output_ready[FHERMA_PIPELINE_OUTPUT]{};
@@ -756,6 +775,10 @@ struct State {
         if(stream) cudaStreamDestroy(stream);
         if(transfer_stream) cudaStreamDestroy(transfer_stream);
         for(auto event:input_ready) if(event) cudaEventDestroy(event);
+#if FHERMA_CRT_PIPELINE
+        for(auto event:crt_ready) if(event) cudaEventDestroy(event);
+        if(crt_join) cudaEventDestroy(crt_join);
+#endif
 #if FHERMA_PIPELINE_OUTPUT>1
         for(auto event:output_ready) if(event) cudaEventDestroy(event);
 #endif
@@ -889,9 +912,31 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
     } else for(unsigned h=first;h<s.n;h*=2)
         stage_rns<Lazy><<<inverse_half,128,0,stream>>>(s.c,s.mods,s.inverse,s.n,h,s.n/h);
     mark(s,5,stream);
-    unsigned crt_blocks=(s.n+CrtOutputs-1)/CrtOutputs;
-    reconstruct_rns<Lazy><<<crt_blocks,128,0,stream>>>(inverse_values,FHERMA_MAPPED_OUTPUT ? s.host_output : s.input,s.mods,s.scale,s.bases,s.roots,
-                                            s.q,s.product,s.n);
+    if(FHERMA_CRT_PIPELINE && s.n==32768) {
+        constexpr unsigned Chunks=FHERMA_CRT_PIPELINE ? FHERMA_CRT_PIPELINE : 1;
+        unsigned crt_blocks=s.n/(Chunks*CrtOutputs);
+        for(unsigned chunk=0;chunk<Chunks;++chunk) {
+            reconstruct_rns<Lazy><<<crt_blocks,128,0,stream>>>(inverse_values,s.input,s.mods,s.scale,s.bases,s.roots,s.q,s.product,s.n,chunk*(s.n/Chunks));
+#if FHERMA_GRAPH && FHERMA_CRT_PIPELINE
+            check(cudaEventRecord(s.crt_ready[chunk],stream),"CRT chunk complete");
+            check(cudaStreamWaitEvent(s.transfer_stream,s.crt_ready[chunk],0),"output DMA waits for CRT chunk");
+            size_t words=size_t(s.n)*AbiWords;
+            for(unsigned part=chunk*(FHERMA_PIPELINE_OUTPUT/Chunks);part<(chunk+1)*(FHERMA_PIPELINE_OUTPUT/Chunks);++part) {
+                size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
+                check(cudaMemcpyAsync(s.host_output+begin,s.input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s.transfer_stream),"CRT pipeline D2H");
+                check(cudaEventRecordWithFlags(s.output_ready[part],s.transfer_stream,cudaEventRecordExternal),"CRT pipeline output ready");
+            }
+#endif
+        }
+#if FHERMA_GRAPH && FHERMA_CRT_PIPELINE
+        // Rejoin the DMA branch before ending capture in the origin stream.
+        check(cudaEventRecord(s.crt_join,s.transfer_stream),"CRT transfer branch finished");
+        check(cudaStreamWaitEvent(stream,s.crt_join,0),"join CRT transfer branch");
+#endif
+    } else {
+        unsigned crt_blocks=(s.n+CrtOutputs-1)/CrtOutputs;
+        reconstruct_rns<Lazy><<<crt_blocks,128,0,stream>>>(inverse_values,FHERMA_MAPPED_OUTPUT ? s.host_output : s.input,s.mods,s.scale,s.bases,s.roots,s.q,s.product,s.n);
+    }
     mark(s,6,stream);
     check(cudaGetLastError(),"RNS kernels");
 }
@@ -914,6 +959,11 @@ void* fherma_init(const fherma::Point& p) {
     static_assert(!FHERMA_MAPPED_OUTPUT || FHERMA_PIPELINE_OUTPUT==1,"mapped output waits for the complete CRT kernel");
     static_assert(!(FHERMA_OUTPUT_APPEND && FHERMA_OUTPUT_SPARE),"choose one output construction experiment");
     static_assert(!FHERMA_HARVEY || (Tile==1024 && FHERMA_RNS_RADIX8 && FHERMA_DIF_FORWARD && FHERMA_RNS_TAIL),"Harvey uses natural input and 1024-element radix-8 tiles");
+    static_assert(!FHERMA_NATURAL_INVERSE || FHERMA_HARVEY,"natural inverse uses odd-root NTT");
+    static_assert(!FHERMA_CRT_PIPELINE || FHERMA_CRT_PIPELINE==2 || FHERMA_CRT_PIPELINE==4 || FHERMA_CRT_PIPELINE==8,"CRT chunks must be 2, 4 or 8");
+    static_assert(!FHERMA_CRT_PIPELINE || FHERMA_PIPELINE_INPUT>1,"CRT pipeline reuses the input transfer stream");
+    static_assert(!FHERMA_CRT_PIPELINE || (FHERMA_NATURAL_INVERSE && FHERMA_OUTPUT_GRAPH && FHERMA_OVERLAP_PREPARE && !FHERMA_MAPPED_OUTPUT),"CRT pipeline requires natural graph output");
+    static_assert(!FHERMA_CRT_PIPELINE || (FHERMA_PIPELINE_OUTPUT>1 && FHERMA_PIPELINE_OUTPUT%(FHERMA_CRT_PIPELINE ? FHERMA_CRT_PIPELINE : 1)==0),"whole DMA parts per CRT chunk");
     pin_near_gpu();
 #if FHERMA_HOST_PROFILE && defined(__linux__)
     std::string thp_policy;
@@ -1002,6 +1052,10 @@ void* fherma_init(const fherma::Point& p) {
 #if FHERMA_PIPELINE_OUTPUT>1
     for(auto& event:s->output_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"RNS output segment event");
 #endif
+#if FHERMA_CRT_PIPELINE
+    for(auto& event:s->crt_ready) check(cudaEventCreateWithFlags(&event,cudaEventDisableTiming),"CRT chunk event");
+    check(cudaEventCreateWithFlags(&s->crt_join,cudaEventDisableTiming),"CRT branch join event");
+#endif
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
     if(s->overlap_input) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
@@ -1025,7 +1079,7 @@ void* fherma_init(const fherma::Point& p) {
 #if FHERMA_PIPELINE_OUTPUT<=1 && !FHERMA_MAPPED_OUTPUT
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture RNS D2H");
 #elif FHERMA_PIPELINE_OUTPUT>1 && FHERMA_OUTPUT_GRAPH
-    for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+    if(!(FHERMA_CRT_PIPELINE && s->n==32768)) for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
         size_t words=bytes/4,begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
         check(cudaMemcpyAsync(s->host_output+begin,s->input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s->stream),"capture RNS output segment");
         // The event must remain a real record node visible to host waits.
