@@ -1845,5 +1845,103 @@
     "host_graph_us": [],
     "host_alloc_us": [],
     "host_staged_us": []
+  },
+  {
+    "id": "6aabe050e3bdd1a5530b564e",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.523031121,
+    "started_at": "2026-09-17T12:42:57.873Z",
+    "finished_at": "2026-09-17T12:44:39.935Z",
+    "commit": "c24de035f211acff6f361b9642dfb3ae47351b53",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.000816613,
+          "median": 0.000817731,
+          "mean": 0.0008899336666666667,
+          "max": 0.001035457
+        }
+      }
+    ],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [
+      {
+        "pack": 128.7,
+        "enqueue": 39.639,
+        "prepare_output": 929.032,
+        "wait": 8.508,
+        "unregister": 172.319
+      },
+      {
+        "pack": 62.303,
+        "enqueue": 33.259,
+        "prepare_output": 553.482,
+        "wait": 7.583,
+        "unregister": 162.365
+      },
+      {
+        "pack": 67.176,
+        "enqueue": 31.624,
+        "prepare_output": 506.5,
+        "wait": 7.477,
+        "unregister": 191.272
+      },
+      {
+        "pack": 60.995,
+        "enqueue": 27.288,
+        "prepare_output": 792.449,
+        "wait": 6.731,
+        "unregister": 135.738
+      },
+      {
+        "pack": 67.105,
+        "enqueue": 30.43,
+        "prepare_output": 530.986,
+        "wait": 7.301,
+        "unregister": 169.049
+      }
+    ],
+    "host_alloc_us": [
+      {
+        "reserve": 8.958,
+        "prefault": 257.487,
+        "zero": 284.502,
+        "register": 377.773
+      },
+      {
+        "reserve": 0.615,
+        "prefault": 2.73,
+        "zero": 160.307,
+        "register": 389.524
+      },
+      {
+        "reserve": 0.728,
+        "prefault": 2.441,
+        "zero": 144.181,
+        "register": 358.899
+      },
+      {
+        "reserve": 8.253,
+        "prefault": 203.154,
+        "zero": 242.746,
+        "register": 338.018
+      },
+      {
+        "reserve": 0.601,
+        "prefault": 2.094,
+        "zero": 143.47,
+        "register": 384.569
+      }
+    ],
+    "host_staged_us": []
   }
 ]
