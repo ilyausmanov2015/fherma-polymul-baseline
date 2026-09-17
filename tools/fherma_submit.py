@@ -7,6 +7,8 @@ Mutations are explicit subcommands and are never automatically retried.
 import argparse
 import concurrent.futures
 import json
+import hashlib
+import time
 from pathlib import Path
 import re
 import subprocess
@@ -27,10 +29,20 @@ BASE='https://www.fherma.io'
 PAGE=f'/kernels/{KERNEL}/{OWNER}/{SLUG}'
 API_PATH=f'/kernels/{KERNEL}/implementations/{SLUG}'
 
+def read_get(client, url, **kwargs):
+    # Only reads are retried. Server actions below remain one-shot mutations.
+    for attempt in range(3):
+        try:
+            response=client.get(url,**kwargs)
+            response.raise_for_status()
+            return response
+        except httpx.TransportError:
+            if attempt==2: raise
+            time.sleep(1+attempt)
+
 def history():
-    response=httpx.get(BASE+PAGE,cookies={'fherma_session':load().token},
-                       headers={'RSC':'1'},timeout=30)
-    response.raise_for_status()
+    with httpx.Client(cookies={'fherma_session':load().token},timeout=30) as client:
+        response=read_get(client,BASE+PAGE,headers={'RSC':'1'})
     # RSC contains length-prefixed text chunks (build logs) and is not JSONL.
     # Decode only the JSON value of the history prop; ignore reference aliases.
     found=[]
@@ -47,14 +59,19 @@ def server_action(page, name, args):
     profile=load()
     if not profile.token: raise RuntimeError('Authenticate with fherma auth login first')
     with httpx.Client(base_url=BASE,cookies={'fherma_session':profile.token},timeout=45) as client:
-        r=client.get(page); r.raise_for_status()
+        r=read_get(client,page)
         scripts=re.findall(r'<script[^>]*src="([^"]+)"',r.text)
         pattern=re.compile(r'createServerReference\)\("([a-f0-9]+)".{0,160}?"'+re.escape(name)+r'"\)')
         def find(src):
             if not src.startswith('/_next/static/'):
                 return None
-            res=client.get(src); res.raise_for_status()
-            m=pattern.search(res.text)
+            cache=ROOT/'local'/'client_chunks'; cache.mkdir(parents=True,exist_ok=True)
+            path=cache/(hashlib.sha256(src.encode()).hexdigest()+'.js')
+            if path.exists(): source=path.read_text()
+            else:
+                source=read_get(client,src).text
+                path.write_text(source)
+            m=pattern.search(source)
             return m[1] if m else None
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
             ids={x for x in pool.map(find,scripts) if x}

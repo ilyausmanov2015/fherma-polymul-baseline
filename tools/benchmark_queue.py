@@ -50,5 +50,5 @@ for commit in commits:
         report=json.loads(path.read_text())
         if report.get('submission',{}).get('commit')==commit: reports.append(report['run'])
     latest=max(reports,key=lambda r:r.get('started_at') or '')
-    print(json.dumps({'completed_commit':commit,**{k:latest.get(k) for k in ['id','status','cases','passed','failure','points']}}),flush=True)
+    print(json.dumps({'completed_commit':commit,**{k:latest.get(k) for k in ['id','status','cases','passed','failure']},'points':[{k:p.get(k) for k in ['point','passed','seeds','seconds']} for p in latest.get('points',[])]}),flush=True)
     subprocess.run([sys.executable,str(ROOT/'tools'/'collect_results.py')],cwd=ROOT,check=True,stdout=subprocess.DEVNULL)
