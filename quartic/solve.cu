@@ -1,3 +1,6 @@
+#ifndef FHERMA_CRT_OUTPUT_SIGNAL
+#define FHERMA_CRT_OUTPUT_SIGNAL 1
+#endif
 #ifndef FHERMA_INPUT_GRAPH
 #define FHERMA_INPUT_GRAPH 0
 #endif
@@ -38,7 +41,7 @@
 #define FHERMA_CRT_LIMB_SUMS 0
 #endif
 #ifndef FHERMA_NATURAL_INVERSE
-#define FHERMA_NATURAL_INVERSE 0
+#define FHERMA_NATURAL_INVERSE 1
 #endif
 #ifndef FHERMA_CRT_PIPELINE
 #define FHERMA_CRT_PIPELINE 0
@@ -724,7 +727,8 @@ template<unsigned Component> __device__ Big fold_component(const Wide& magnitude
 }
 template<bool Lazy> __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const SmallMod* mods,
                                 const Twiddle* scales,const uint32_t* bases,const Roots* roots,
-                                const uint32_t* q_words,const uint32_t* product,unsigned n,unsigned begin=0) {
+                                const uint32_t* q_words,const uint32_t* product,unsigned n,unsigned begin=0,
+                                uint32_t* counters=nullptr,uint32_t* ready_flags=nullptr) {
     static_assert(CrtOutputs==32,"one warp per quartic component");
     __shared__ uint32_t partial[128*29];
     unsigned lane=threadIdx.x&31,component=threadIdx.x/32,i=begin+blockIdx.x*32+lane;
@@ -796,6 +800,26 @@ template<bool Lazy> __global__ void reconstruct_rns(const uint32_t* residues,uin
         unsigned coefficient=word/AbiWords,limb=word%AbiWords,index=begin+blockIdx.x*32+coefficient;
         if(index<n) output[natural_index(index,n)*AbiWords+limb]=partial[coefficient*29+limb];
     }
+#if defined(__CUDACC__) && FHERMA_CRT_OUTPUT_SIGNAL
+    if(ready_flags) {
+        // Every writer completes its own host-visible stores before this block
+        // acknowledges its tile. A fence by thread 0 alone would not suffice.
+        __threadfence_system();
+        __syncthreads();
+        if(threadIdx.x==0) {
+            constexpr unsigned BlocksPerPart=32768/(32*FHERMA_PIPELINE_OUTPUT);
+            unsigned part=blockIdx.x/BlocksPerPart;
+            if(atomicAdd(counters+part,1u)==BlocksPerPart-1) {
+                // All tiles in this contiguous output part are now published.
+                // The CPU performs only aligned acquire loads of this flag.
+                reinterpret_cast<volatile uint32_t*>(ready_flags)[part*16]=1;
+                __threadfence_system();
+            }
+        }
+    }
+#else
+    (void)counters;(void)ready_flags;
+#endif
 }
 void check(cudaError_t status,const char* operation) {
     if(status!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(status));
@@ -817,10 +841,11 @@ struct State {
     // replacement inside its timed call; returned result ownership is unique.
     std::vector<uint32_t> spare_output;
     unsigned n=0,logn=0;
-    bool overlap_input=false,lazy_ntt=false,input_graph=false;
+    bool overlap_input=false,lazy_ntt=false,input_graph=false,direct_output=false;
     uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
     uint32_t *q=nullptr,*product=nullptr,*host_input=nullptr,*host_output=nullptr;
     uint32_t* mapped_input=nullptr; // Non-owning CUDA alias, not necessarily the host address.
+    uint32_t *mapped_output=nullptr,*output_counters=nullptr,*output_flags=nullptr;
     SmallMod* mods=nullptr; Roots* roots=nullptr;
     Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr,*tail_forward=nullptr,*tail_inverse=nullptr,*input_powers=nullptr;
 #if FHERMA_GRAPH
@@ -861,6 +886,7 @@ struct State {
 #endif
         cudaFree(input);cudaFree(input_soa);cudaFree(ab);cudaFree(c);cudaFree(bases);cudaFree(scratch);
         cudaFree(q);cudaFree(product);cudaFree(mods);cudaFree(forward);cudaFree(inverse);
+        cudaFree(output_counters);
         cudaFree(roots);cudaFree(scale);cudaFree(small_forward);cudaFree(small_inverse);cudaFree(tail_forward);cudaFree(tail_inverse);cudaFree(input_powers);
         cudaFreeHost(host_input);cudaFreeHost(host_output);
     }
@@ -1018,7 +1044,7 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
 #endif
     } else {
         unsigned crt_blocks=(s.n+CrtOutputs-1)/CrtOutputs;
-        reconstruct_rns<Lazy><<<crt_blocks,128,0,stream>>>(inverse_values,FHERMA_MAPPED_OUTPUT ? s.host_output : s.input,s.mods,s.scale,s.bases,s.roots,s.q,s.product,s.n);
+        reconstruct_rns<Lazy><<<crt_blocks,128,0,stream>>>(inverse_values,s.direct_output ? s.mapped_output : (FHERMA_MAPPED_OUTPUT ? s.host_output : s.input),s.mods,s.scale,s.bases,s.roots,s.q,s.product,s.n,0,s.output_counters,s.output_flags);
     }
     mark(s,6,stream);
     check(cudaGetLastError(),"RNS kernels");
@@ -1040,6 +1066,7 @@ void* fherma_init(const fherma::Point& p) {
                   "profile arithmetic separately from overlapped host transfers");
     static_assert(FHERMA_PIPELINE_OUTPUT<=32,"output segments fit the smallest point");
     static_assert(!FHERMA_MAPPED_OUTPUT || FHERMA_PIPELINE_OUTPUT==1,"mapped output waits for the complete CRT kernel");
+    static_assert(!FHERMA_CRT_OUTPUT_SIGNAL || (FHERMA_NATURAL_INVERSE && FHERMA_OUTPUT_SIGNAL && FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE && !FHERMA_MAPPED_OUTPUT && FHERMA_PIPELINE_OUTPUT>1),"direct CRT signals require natural contiguous output and captured completion");
     static_assert(!(FHERMA_OUTPUT_APPEND && FHERMA_OUTPUT_SPARE),"choose one output construction experiment");
     static_assert(!FHERMA_HARVEY || (Tile==1024 && FHERMA_RNS_RADIX8 && FHERMA_DIF_FORWARD && FHERMA_RNS_TAIL),"Harvey uses natural input and 1024-element radix-8 tiles");
     static_assert(!FHERMA_NATURAL_INVERSE || FHERMA_HARVEY,"natural inverse uses odd-root NTT");
@@ -1065,7 +1092,7 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaDeviceGetAttribute(&concurrent,cudaDevAttrConcurrentManagedAccess,device),"query concurrent managed access");
     check(cudaDeviceGetAttribute(&direct,cudaDevAttrDirectManagedMemAccessFromHost,device),"query direct host access");
     std::fprintf(stderr,"MEMORY_CAPS pageable=%d host_tables=%d concurrent=%d direct=%d\n",pageable,host_tables,concurrent,direct);
-    if(FHERMA_MAPPED_INPUT || FHERMA_MAPPED_OUTPUT) {
+    if(FHERMA_MAPPED_INPUT || FHERMA_MAPPED_OUTPUT || FHERMA_CRT_OUTPUT_SIGNAL) {
         int unified=0;
         check(cudaDeviceGetAttribute(&unified,cudaDevAttrUnifiedAddressing,device),"query UVA for pinned input");
         if(!unified) throw std::runtime_error("mapped pinned buffers require unified addressing");
@@ -1133,7 +1160,16 @@ void* fherma_init(const fherma::Point& p) {
 #ifndef __CUDACC__
     s->mapped_input=s->host_input;
 #endif
+#if defined(__CUDACC__) && FHERMA_CRT_OUTPUT_SIGNAL
+    check(cudaHostAlloc(reinterpret_cast<void**>(&s->host_output),bytes,cudaHostAllocMapped),"mapped CRT output");
+    check(cudaHostGetDevicePointer(reinterpret_cast<void**>(&s->mapped_output),s->host_output,0),"map CRT output alias");
+#else
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_output),bytes),"pinned RNS output");
+    s->mapped_output=s->host_output;
+#endif
+#ifndef __CUDACC__
+    s->direct_output=FHERMA_CRT_OUTPUT_SIGNAL && s->n==32768;
+#endif
     std::memset(s->host_input,0,2*bytes);std::memset(s->host_output,0,bytes);
 #if FHERMA_PROFILE
     for(auto& event:s->events) check(cudaEventCreate(&event),"RNS profile event");
@@ -1159,6 +1195,13 @@ void* fherma_init(const fherma::Point& p) {
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
     static_assert(FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_CRT_PIPELINE,"completion flags require staged output without CRT branching");
     s->completion.init(s->stream,bool(FHERMA_OUTPUT_GRAPH));
+#if FHERMA_CRT_OUTPUT_SIGNAL
+    s->direct_output=s->n==32768 && s->completion.enabled();
+    if(s->direct_output) {
+        check(cudaMalloc(&s->output_counters,FHERMA_PIPELINE_OUTPUT*sizeof(uint32_t)),"allocate CRT completion counters");
+        s->output_flags=s->completion.device_flags();
+    }
+#endif
 #endif
     if(s->overlap_input && !s->input_graph) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
@@ -1173,6 +1216,9 @@ void* fherma_init(const fherma::Point& p) {
         check(cudaStreamSynchronize(s->stream),"RNS input graphs ready");
     }
     check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS graph");
+#if defined(__CUDACC__) && FHERMA_CRT_OUTPUT_SIGNAL
+    if(s->direct_output) check(cudaMemsetAsync(s->output_counters,0,FHERMA_PIPELINE_OUTPUT*sizeof(uint32_t),s->stream),"reset CRT tile counters");
+#endif
     mark(*s,0,s->stream);
 #if FHERMA_PIPELINE_INPUT<=1
     check(cudaMemcpyAsync(s->input,s->host_input,2*bytes,cudaMemcpyHostToDevice,s->stream),"capture RNS H2D");
@@ -1197,7 +1243,7 @@ void* fherma_init(const fherma::Point& p) {
 #if FHERMA_PIPELINE_OUTPUT<=1 && !FHERMA_MAPPED_OUTPUT
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture RNS D2H");
 #elif FHERMA_PIPELINE_OUTPUT>1 && FHERMA_OUTPUT_GRAPH
-    if(!(FHERMA_CRT_PIPELINE && s->n==32768)) for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+    if(!s->direct_output && !(FHERMA_CRT_PIPELINE && s->n==32768)) for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
         size_t words=bytes/4,begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
         check(cudaMemcpyAsync(s->host_output+begin,s->input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s->stream),"capture RNS output segment");
         // The event must remain a real record node visible to host waits.
@@ -1363,7 +1409,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #elif FHERMA_GRAPH
         check(cudaStreamSynchronize(s.stream),"RNS output ready");
 #else
-        if(!FHERMA_MAPPED_OUTPUT) check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"RNS D2H");
+        if(!FHERMA_MAPPED_OUTPUT && !s.direct_output) check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"RNS D2H");
         mark(s,7);
         check(cudaDeviceSynchronize(),"RNS diagnostic events ready");
 #endif

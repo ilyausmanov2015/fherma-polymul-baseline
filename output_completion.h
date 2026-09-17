@@ -59,6 +59,7 @@ public:
         std::fprintf(stderr,"OUTPUT_COMPLETION supported=1 graph=%d\n",graph_);
     }
     bool enabled() const { return supported_; }
+    uint32_t* device_flags() const { return reinterpret_cast<uint32_t*>(device_); }
     void begin() {
         if(!supported_) return;
         if(graph_) {
