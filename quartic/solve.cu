@@ -1,5 +1,8 @@
+#ifndef FHERMA_MAPPED_INPUT
+#define FHERMA_MAPPED_INPUT 1
+#endif
 #ifndef FHERMA_QUARTIC_COMPACT_SCALE
-#define FHERMA_QUARTIC_COMPACT_SCALE 1
+#define FHERMA_QUARTIC_COMPACT_SCALE 0
 #endif
 #ifndef FHERMA_OVERLAP_PREPARE
 #define FHERMA_OVERLAP_PREPARE 1
@@ -93,12 +96,12 @@ __device__ uint32_t multiply_mod(uint32_t a,uint32_t b,const SmallMod& modulus) 
 }
 // ABI coefficients are AoS. Transpose once so all 16 residue transforms
 // read a limb plane in contiguous warp-wide transactions.
-__global__ void transpose_inputs(const uint32_t* input,uint32_t* output,unsigned n,unsigned begin=0,unsigned count=0) {
+__global__ void transpose_inputs(const uint32_t* input,uint32_t* output,unsigned n,unsigned begin=0,unsigned count=0,bool packed=false) {
     __shared__ uint32_t tile[32*33];
     unsigned x=threadIdx.x&31,y=threadIdx.x>>5,base=begin+blockIdx.x*32,end=count ? begin+count : n;
-    input+=blockIdx.y*n*AbiWords;output+=blockIdx.y*n*AbiWords;
+    input+=blockIdx.y*(packed ? count : n)*AbiWords;output+=blockIdx.y*n*AbiWords;
     for(unsigned dy=0;dy<32;dy+=8)
-        if(x<AbiWords && base+y+dy<end) tile[(y+dy)*33+x]=input[(base+y+dy)*AbiWords+x];
+        if(x<AbiWords && base+y+dy<end) tile[(y+dy)*33+x]=input[(base+y+dy-(packed ? begin : 0))*AbiWords+x];
     __syncthreads();
     for(unsigned dy=0;dy<32;dy+=8)
         if(y+dy<AbiWords && base+x<end) output[(y+dy)*n+base+x]=tile[x*33+y+dy];
@@ -408,7 +411,8 @@ template<class T> void upload(T*& destination,const std::vector<T>& source) {
 }
 void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stream=nullptr) {
     dim3 abi_tiles((count+31)/32,2),residues((count+127)/128,2*ModCount);
-    transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n,begin,count);
+    const uint32_t* source=FHERMA_MAPPED_INPUT ? s.host_input+size_t(2)*begin*AbiWords : s.input;
+    transpose_inputs<<<abi_tiles,256,0,stream>>>(source,s.input_soa,s.n,begin,count,bool(FHERMA_MAPPED_INPUT));
     prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true);
     check(cudaGetLastError(),"RNS input chunk kernels");
 }
@@ -492,6 +496,11 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaDeviceGetAttribute(&concurrent,cudaDevAttrConcurrentManagedAccess,device),"query concurrent managed access");
     check(cudaDeviceGetAttribute(&direct,cudaDevAttrDirectManagedMemAccessFromHost,device),"query direct host access");
     std::fprintf(stderr,"MEMORY_CAPS pageable=%d host_tables=%d concurrent=%d direct=%d\n",pageable,host_tables,concurrent,direct);
+    if(FHERMA_MAPPED_INPUT) {
+        int unified=0;
+        check(cudaDeviceGetAttribute(&unified,cudaDevAttrUnifiedAddressing,device),"query UVA for pinned input");
+        if(!unified) throw std::runtime_error("mapped pinned input requires unified addressing");
+    }
 #endif
     auto s=std::make_unique<State>();s->n=p.N;s->logn=__builtin_ctz(p.N);
     s->overlap_input=FHERMA_OVERLAP_PREPARE && FHERMA_PIPELINE_INPUT>1 && FHERMA_RNS_TAIL && p.N==32768;
@@ -592,6 +601,11 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     unsigned input_part=0;
     copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,input.a.data.data(),input.b.data.data(),words,
         [&](size_t begin,const uint32_t* a,const uint32_t* b,size_t count) {
+            if(FHERMA_MAPPED_INPUT && s.overlap_input) {
+                check(cudaGraphLaunch(s.prepare_graph[input_part],s.stream),"execute mapped input chunk");
+                ++input_part;
+                return;
+            }
             auto transfer=s.overlap_input ? s.transfer_stream : s.stream;
             check(cudaMemcpyAsync(s.input+begin,a,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline A H2D");
             check(cudaMemcpyAsync(s.input+words+begin,b,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline B H2D");
@@ -603,7 +617,10 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
             ++input_part;
         });
 #else
-    s.copy.inputs(s.host_input,input.a.data.data(),input.b.data.data(),bytes);
+    if(FHERMA_MAPPED_INPUT && s.overlap_input)
+        copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,input.a.data.data(),input.b.data.data(),words,
+            [](size_t,const uint32_t*,const uint32_t*,size_t) {});
+    else s.copy.inputs(s.host_input,input.a.data.data(),input.b.data.data(),bytes);
 #endif
 #if FHERMA_PROFILE
     auto pack_end=std::chrono::steady_clock::now();
@@ -620,7 +637,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #endif
 #else
         mark(s,0);
-        check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"RNS H2D");
+        if(!(FHERMA_MAPPED_INPUT && s.overlap_input)) check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"RNS H2D");
         mark(s,1);
         if(s.overlap_input) for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part)
             launch_input_chunk(s,s.n*part/FHERMA_PIPELINE_INPUT,s.n/FHERMA_PIPELINE_INPUT);
