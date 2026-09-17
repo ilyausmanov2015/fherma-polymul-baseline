@@ -7,10 +7,14 @@
 int main() {
     const size_t sizes[]={0,1,31,63,64,65,127,128,4095,4096,4097,65537,1048593};
     const size_t offsets[]={0,1,15,31,63};
-    for(unsigned cached=0;cached<2;++cached) for(auto n:sizes) for(auto src:offsets) for(auto dst:offsets) {
+    for(unsigned cached=0;cached<3;++cached) for(auto n:sizes) for(auto src:offsets) for(auto dst:offsets) {
         std::vector<unsigned char> in(n+128),got(n+128,0xa5),expected=got;
         for(size_t i=0;i<in.size();++i) in[i]=static_cast<unsigned char>((i*7919)^(i>>9));
         std::memcpy(expected.data()+dst,in.data()+src,n);
+#if defined(__x86_64__) && defined(__GNUC__)
+        if(cached==2 && __builtin_cpu_supports("movdir64b")) direct_copy64(got.data()+dst,in.data()+src,n);
+        else
+#endif
         if(cached) host_copy_cached(got.data()+dst,in.data()+src,n);
         else host_copy_bytes(got.data()+dst,in.data()+src,n);
         host_discard_cached_reads(in.data()+src,n);
@@ -20,9 +24,10 @@ int main() {
         }
     }
 #if defined(__x86_64__) && defined(__GNUC__)
-    std::printf("Host copy: 650 streaming/cached cases passed; AVX-512 available=%d\n",bool(__builtin_cpu_supports("avx512f")));
+    std::printf("Host copy: 975 streaming/cached/direct cases passed; AVX-512 available=%d\n",bool(__builtin_cpu_supports("avx512f")));
+    std::printf("Direct store: MOVDIR64B available=%d\n",bool(__builtin_cpu_supports("movdir64b")));
     std::printf("Cache discard: CLFLUSHOPT available=%d\n",bool(__builtin_cpu_supports("clflushopt")));
 #else
-    std::puts("Host copy: 650 streaming/cached cases passed; portable fallback");
+    std::puts("Host copy: 975 streaming/cached/direct cases passed; portable fallback");
 #endif
 }

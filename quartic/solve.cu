@@ -140,7 +140,7 @@
 #define FHERMA_GRAPH 1
 #endif
 #ifndef FHERMA_COPY_THREADS
-#define FHERMA_COPY_THREADS 24
+#define FHERMA_COPY_THREADS 16
 #endif
 #ifndef FHERMA_OUTPUT_THREADS
 #define FHERMA_OUTPUT_THREADS (FHERMA_COPY_THREADS<8 ? FHERMA_COPY_THREADS : 8)
@@ -1331,3 +1331,6 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     }
 }
 void fherma_free(void* state) { delete static_cast<State*>(state); }
+#ifndef FHERMA_DIRECT_COPY
+#define FHERMA_DIRECT_COPY 1
+#endif

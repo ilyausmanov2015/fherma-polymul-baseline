@@ -4,6 +4,22 @@
 #include <cstring>
 #if defined(__x86_64__) && defined(__GNUC__)
 #include <immintrin.h>
+__attribute__((target("movdir64b")))
+inline void direct_copy64(void* target,const void* source,size_t bytes) {
+    auto* out=static_cast<char*>(target);
+    auto* in=static_cast<const char*>(source);
+    size_t prefix=(-reinterpret_cast<uintptr_t>(out))&63;
+    if(prefix>bytes) prefix=bytes;
+    std::memcpy(out,in,prefix);out+=prefix;in+=prefix;bytes-=prefix;
+    while(bytes>=256) {
+        _movdir64b(out,in);_movdir64b(out+64,in+64);
+        _movdir64b(out+128,in+128);_movdir64b(out+192,in+192);
+        out+=256;in+=256;bytes-=256;
+    }
+    while(bytes>=64) {_movdir64b(out,in);out+=64;in+=64;bytes-=64;}
+    std::memcpy(out,in,bytes);
+    _mm_sfence(); // Direct stores use weak ordering, just like streaming stores.
+}
 template<bool Streaming> __attribute__((target("avx512f")))
 inline void vector_copy_avx512(void* target,const void* source,size_t bytes) {
     auto* out=static_cast<char*>(target);
@@ -39,6 +55,11 @@ inline void vector_copy_avx512(void* target,const void* source,size_t bytes) {
 }
 #endif
 inline void host_copy_bytes(void* out,const void* in,size_t bytes) {
+#if defined(__x86_64__) && defined(__GNUC__) && FHERMA_DIRECT_COPY
+    if(bytes>=4096 && __builtin_cpu_supports("movdir64b")) {
+        direct_copy64(out,in,bytes);return;
+    }
+#endif
 #if defined(__x86_64__) && defined(__GNUC__) && FHERMA_STREAM_COPY
     if(bytes>=4096 && __builtin_cpu_supports("avx512f")) {
         vector_copy_avx512<true>(out,in,bytes); return;
