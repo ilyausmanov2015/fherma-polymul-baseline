@@ -1,5 +1,8 @@
+#ifndef FHERMA_CRT_LIMB_SUMS
+#define FHERMA_CRT_LIMB_SUMS 1
+#endif
 #ifndef FHERMA_NATURAL_INVERSE
-#define FHERMA_NATURAL_INVERSE 1
+#define FHERMA_NATURAL_INVERSE 0
 #endif
 #ifndef FHERMA_CRT_PIPELINE
 #define FHERMA_CRT_PIPELINE 0
@@ -11,10 +14,10 @@
 #define FHERMA_HARVEY_BITS 3
 #endif
 #ifndef FHERMA_HARVEY
-#define FHERMA_HARVEY 1
+#define FHERMA_HARVEY 0
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 1
+#define FHERMA_OUTPUT_GRAPH 0
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -132,6 +135,7 @@
 #endif
 #include "fherma.h"
 #include "quartic/host_setup.h"
+#include "quartic/limb_accumulator.h"
 #include <cupqc/bigint.hpp>
 #include <cuda_runtime.h>
 #include "host_affinity.h"
@@ -681,6 +685,9 @@ template<bool Lazy> __global__ void reconstruct_rns(const uint32_t* residues,uin
     __shared__ uint32_t partial[128*29];
     unsigned lane=threadIdx.x&31,component=threadIdx.x/32,i=begin+blockIdx.x*32+lane;
     Wide accumulator(uint32_t(0));uint64_t fraction=0;uint32_t alpha=0;
+#if FHERMA_CRT_LIMB_SUMS
+    LimbAccumulator<WideWords> limb_sums;
+#endif
     #pragma unroll 1
     for(unsigned pi=0;i<n && pi<ModCount;++pi) {
         auto modulus=mods[pi];uint32_t p=modulus.p;
@@ -704,8 +711,15 @@ template<bool Lazy> __global__ void reconstruct_rns(const uint32_t* residues,uin
 #endif
         uint64_t term=uint64_t(t)*modulus.reciprocal,next=fraction+term;
         alpha+=next<fraction;fraction=next;
+#if FHERMA_CRT_LIMB_SUMS
+        limb_sums.add(bases+pi*WideWords,t);
+#else
         accumulator=accumulator+Wide(bases,pi).mul_scalar(t);
+#endif
     }
+#if FHERMA_CRT_LIMB_SUMS
+    limb_sums.store(accumulator);
+#endif
     uint32_t nearest=alpha+uint32_t(fraction>>63);
     Wide correction=Wide(product,0).mul_scalar(nearest);
     bool negative=!(accumulator>=correction);
