@@ -36,6 +36,9 @@
 #ifndef FHERMA_FIRST_CPU
 #define FHERMA_FIRST_CPU 0
 #endif
+#ifndef FHERMA_DEFER_INPUT_CALLER
+#define FHERMA_DEFER_INPUT_CALLER 0
+#endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
@@ -50,6 +53,7 @@ class HostCopyPool {
     unsigned generation_=0,pending_=0;
     bool stop_=false;
     bool in_flight_=false;
+    bool deferred_caller_=false;
     unsigned active_generation_=0;
 #if FHERMA_SPIN_COPY
     alignas(64) std::atomic<unsigned> spin_generation_{0};
@@ -132,8 +136,9 @@ class HostCopyPool {
 #endif
         for(auto& thread:workers_) if(thread.joinable()) thread.join();
     }
-    void begin(Job job) {
+    void begin(Job job,bool defer_caller=false) {
         assert(!in_flight_);in_flight_=true;
+        deferred_caller_=defer_caller;
 #if FHERMA_SPIN_COPY
         job_=job;
 #if FHERMA_COPY_ACKS
@@ -142,14 +147,15 @@ class HostCopyPool {
         spin_pending_.store(Threads-1,std::memory_order_relaxed);
         spin_generation_.fetch_add(1,std::memory_order_release);
 #endif
-        part(job,Threads-1);
+        if(!deferred_caller_) part(job,Threads-1);
 #else
         { std::lock_guard<std::mutex> lock(mutex_); job_=job; pending_=Threads-1; ++generation_; }
-        start_.notify_all(); part(job,Threads-1);
+        start_.notify_all();if(!deferred_caller_) part(job,Threads-1);
 #endif
     }
     void finish() {
         assert(in_flight_);
+        if(deferred_caller_) part(job_,Threads-1);
 #if FHERMA_SPIN_COPY
 #if FHERMA_COPY_ACKS
         for(auto& worker:completed_)
@@ -198,7 +204,7 @@ public:
         run({static_cast<const char*>(a),static_cast<const char*>(b),static_cast<char*>(out),bytes});
     }
     void begin_inputs(void* out,const void* a,const void* b,size_t bytes) {
-        begin({static_cast<const char*>(a),static_cast<const char*>(b),static_cast<char*>(out),bytes});
+        begin({static_cast<const char*>(a),static_cast<const char*>(b),static_cast<char*>(out),bytes},bool(FHERMA_DEFER_INPUT_CALLER));
     }
     void finish_inputs() { finish(); }
     void prefault(void* storage,size_t bytes) {
