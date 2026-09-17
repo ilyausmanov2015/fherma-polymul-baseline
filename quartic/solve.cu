@@ -1,3 +1,6 @@
+#ifndef FHERMA_MAIN_OUTPUT
+#define FHERMA_MAIN_OUTPUT 1
+#endif
 #ifndef FHERMA_DIF_FORWARD
 #define FHERMA_DIF_FORWARD 1
 #endif

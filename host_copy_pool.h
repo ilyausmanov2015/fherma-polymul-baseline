@@ -29,6 +29,9 @@
 #ifndef FHERMA_COPY_ACKS
 #define FHERMA_COPY_ACKS 0
 #endif
+#ifndef FHERMA_MAIN_OUTPUT
+#define FHERMA_MAIN_OUTPUT 0
+#endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
@@ -59,6 +62,13 @@ class HostCopyPool {
     }
 #endif
     static void part(const Job& job,unsigned rank) {
+#if FHERMA_MAIN_OUTPUT
+        // Let the caller copy one output partition instead of only polling.
+        if(!job.b && OutputThreads<Threads) {
+            if(rank==Threads-1) rank=OutputThreads-1;
+            else if(rank==OutputThreads-1) return;
+        }
+#endif
         if(!job.b && rank>=OutputThreads) return;
         if(job.prefault) {
             size_t begin=job.bytes*rank/OutputThreads,end=job.bytes*(rank+1)/OutputThreads;
