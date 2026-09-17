@@ -1,0 +1,13 @@
+{
+  "kind": "rns-mathematical-prototype",
+  "prime_count": 57,
+  "prime_min": 2099838977,
+  "prime_max": 2147352577,
+  "product_bits": 1767,
+  "required_bound_bits": 1752,
+  "sum_bits_bound": 1772,
+  "crt_cases": 10012,
+  "shoup_cases": 114000,
+  "fold_cases": 6018,
+  "passed": true
+}
