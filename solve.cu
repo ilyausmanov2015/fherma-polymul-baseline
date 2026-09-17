@@ -17,15 +17,20 @@
 #ifndef FHERMA_FUSED_SMALL
 #define FHERMA_FUSED_SMALL 1
 #endif
+#ifndef FHERMA_NUMA
+#define FHERMA_NUMA 1
+#endif
 
 // Exact negacyclic NTT baseline. All device modular arithmetic uses cuPQC.
 #include "fherma.h"
 #include "wide_host.h"
 #include <cupqc/bigint.hpp>
 #include <cuda_runtime.h>
+#include "host_affinity.h"
 #include <memory>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 
 namespace {
 constexpr unsigned L=28;
@@ -198,6 +203,7 @@ __global__ void finish(const uint32_t* c,uint32_t* out,const uint32_t* scale,con
 void* fherma_init(const fherma::Point& p) {
     if(p.N<2 || (p.N&(p.N-1)) || p.N>32768 || p.W!=868 || p.L!=L || p.q.data.size()!=L)
         throw std::runtime_error("coverage: power-of-two 2<=N<=32768, W=868, L=28");
+    if(FHERMA_NUMA) pin_near_gpu();
 #if !FHERMA_MONTGOMERY
     uint32_t delta=uint32_t(0)-p.q.data[0];
     bool special=delta>0 && delta<0x10000000u && p.q.data[27]==15u;
@@ -232,8 +238,14 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     if(in.a.data.size()!=words || in.b.data.size()!=words) throw std::runtime_error("input size");
     mark(s,0);
 #if FHERMA_PINNED
+#if FHERMA_PROFILE
+    auto pack_start=std::chrono::steady_clock::now();
+#endif
     std::memcpy(s.host_input,in.a.data.data(),bytes);
     std::memcpy(s.host_input+words,in.b.data.data(),bytes);
+#if FHERMA_PROFILE
+    double pack_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-pack_start).count();
+#endif
     check(cudaMemcpy(s.input,s.host_input,2*bytes,cudaMemcpyHostToDevice),"pinned inputs H2D");
 #else
     check(cudaMemcpy(s.input,in.a.data.data(),bytes,cudaMemcpyHostToDevice),"copy a");
@@ -265,7 +277,13 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
     fherma::Outputs out; out.c.shape={s.n,L};
 #if FHERMA_PINNED
     check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"pinned output D2H");
+#if FHERMA_PROFILE
+    auto unpack_start=std::chrono::steady_clock::now();
+#endif
     out.c.data.assign(s.host_output,s.host_output+words);
+#if FHERMA_PROFILE
+    double unpack_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-unpack_start).count();
+#endif
 #else
     out.c.data.resize(words);
     check(cudaMemcpy(out.c.data.data(),s.input,bytes,cudaMemcpyDeviceToHost),"copy output / synchronize");
@@ -280,6 +298,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
         std::fprintf(stderr," %s=%.3f",names[i],ms*1000);
     }
     std::fprintf(stderr,"\n");
+#if FHERMA_PINNED
+    std::fprintf(stderr,"HOST_US pack=%.3f unpack=%.3f\n",pack_us,unpack_us);
+#endif
 #endif
     return out;
 }
