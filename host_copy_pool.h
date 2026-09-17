@@ -63,7 +63,12 @@ class HostCopyPool {
     static_assert(!FHERMA_INPUT_WORKERS_ONLY || Threads<24,"leave an allowed CPU for the caller");
     static_assert(Threads>=2 && Threads%2==0,"even copy thread count required");
     static_assert(OutputThreads>=1 && OutputThreads<=Threads,"output workers must fit the pool");
-    struct Job { const char *a=nullptr,*b=nullptr; char* out=nullptr; size_t bytes=0; bool prefault=false; } job_;
+    struct Pipeline {
+        std::atomic<unsigned> ready{0};
+        std::atomic<bool> cancelled{false};
+        unsigned parts=0;
+    };
+    struct Job { const char *a=nullptr,*b=nullptr; char* out=nullptr; size_t bytes=0; bool prefault=false; Pipeline* pipeline=nullptr; } job_;
     std::mutex mutex_;
     std::condition_variable start_,done_;
     std::array<std::thread,Workers> workers_;
@@ -84,6 +89,7 @@ class HostCopyPool {
     struct alignas(64) Completion { std::atomic<unsigned> generation{0}; };
     std::array<Completion,Workers> completed_;
     alignas(64) std::atomic<bool> spin_stop_{false};
+#endif
     static void pause() {
 #if defined(__x86_64__)
         __builtin_ia32_pause();
@@ -93,8 +99,7 @@ class HostCopyPool {
         std::this_thread::yield();
 #endif
     }
-#endif
-    static void part(const Job& job,unsigned rank) {
+    static void part_plain(const Job& job,unsigned rank) {
 #if FHERMA_MAIN_OUTPUT
         // Let the caller copy one output partition instead of only polling.
         if(!job.b && OutputThreads<Threads) {
@@ -134,6 +139,23 @@ class HostCopyPool {
         if(FHERMA_INPUT_WORKERS_ONLY && rank==Threads-1) return false;
         if(FHERMA_MAIN_OUTPUT && OutputThreads<Threads) return rank<OutputThreads-1;
         return rank<OutputThreads;
+    }
+    static Job pipeline_chunk(const Job& job,unsigned chunk) {
+        size_t words=job.bytes/4;
+        size_t begin=4*(words*chunk/job.pipeline->parts);
+        size_t end=4*(words*(chunk+1)/job.pipeline->parts);
+        return {job.a+begin,nullptr,job.out+begin,end-begin};
+    }
+    static void part(const Job& job,unsigned rank) {
+        if(!job.pipeline) {part_plain(job,rank);return;}
+        if(!output_worker(rank) && rank!=Threads-1) return;
+        for(unsigned chunk=0;chunk<job.pipeline->parts;++chunk) {
+            while(job.pipeline->ready.load(std::memory_order_acquire)<=chunk) {
+                if(job.pipeline->cancelled.load(std::memory_order_acquire)) return;
+                pause();
+            }
+            part_plain(pipeline_chunk(job,chunk),rank);
+        }
     }
     void worker(unsigned rank) {
         unsigned seen=0;
@@ -287,5 +309,25 @@ public:
     }
     void output(void* out,const void* source,size_t bytes) {
         run({static_cast<const char*>(source),nullptr,static_cast<char*>(out),bytes});
+    }
+    template<unsigned Parts,class Wait> void output_pipeline(void* out,const void* source,size_t words,Wait wait_ready) {
+        static_assert(Parts>0,"nonempty output pipeline");
+        Pipeline pipeline;pipeline.parts=Parts;
+        Job job{static_cast<const char*>(source),nullptr,static_cast<char*>(out),words*4,false,&pipeline};
+        begin(job,true);
+        // The caller publishes each ready DMA segment and copies its own slice.
+        // Workers consume all segments under one job and acknowledge only once.
+        deferred_caller_=false;
+        try {
+            for(unsigned chunk=0;chunk<Parts;++chunk) {
+                wait_ready(chunk);
+                pipeline.ready.store(chunk+1,std::memory_order_release);
+                part_plain(pipeline_chunk(job,chunk),Threads-1);
+            }
+        } catch(...) {
+            pipeline.cancelled.store(true,std::memory_order_release);
+            finish();throw;
+        }
+        finish();
     }
 };

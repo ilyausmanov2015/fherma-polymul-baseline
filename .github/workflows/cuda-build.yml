@@ -55,6 +55,12 @@ jobs:
         run: |
           g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=2 -DFHERMA_DEFER_MAIN_PIN=1 tests/deferred_affinity.cpp -o /tmp/affinity-check
           /tmp/affinity-check
+      - name: Check persistent output pipeline and cancellation
+        run: |
+          for mode in 0 1; do
+            g++ -O2 -std=c++17 -pthread -I. -DFHERMA_COPY_THREADS=4 -DFHERMA_OUTPUT_THREADS=2 -DFHERMA_SPIN_COPY=$mode -DFHERMA_COPY_ACKS=1 -DFHERMA_MAIN_OUTPUT=1 tests/output_pipeline.cpp -o /tmp/output-pipeline-check
+            /tmp/output-pipeline-check
+          done
       - name: Check input copy without caller participation
         run: |
           for mode in 0 1; do

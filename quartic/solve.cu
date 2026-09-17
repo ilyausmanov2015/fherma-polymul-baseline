@@ -1,3 +1,6 @@
+#ifndef FHERMA_OUTPUT_WORKER_PIPELINE
+#define FHERMA_OUTPUT_WORKER_PIPELINE 1
+#endif
 #ifndef FHERMA_DIRECT_COPY
 #define FHERMA_DIRECT_COPY 0
 #endif
@@ -5,7 +8,7 @@
 #define FHERMA_ASYNC_OUTPUT_PREFAULT 1
 #endif
 #ifndef FHERMA_OUTPUT_SIGNAL
-#define FHERMA_OUTPUT_SIGNAL 1
+#define FHERMA_OUTPUT_SIGNAL 0
 #endif
 #ifndef FHERMA_FLUSH_OUTPUT_SOURCE
 #define FHERMA_FLUSH_OUTPUT_SOURCE 0
@@ -38,7 +41,7 @@
 #define FHERMA_HARVEY 0
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 1
+#define FHERMA_OUTPUT_GRAPH 0
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -1289,6 +1292,11 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     auto unpack_start=std::chrono::steady_clock::now();
 #endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
+#if FHERMA_OUTPUT_WORKER_PIPELINE
+    static_assert(!FHERMA_OUTPUT_APPEND,"worker pipeline copies into constructed vector storage");
+    s.copy.output_pipeline<FHERMA_PIPELINE_OUTPUT>(output.c.data.data(),s.host_output,words,
+        [&](unsigned part) {wait_output_part(s,part);});
+#else
     for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
         wait_output_part(s,part);
         size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
@@ -1296,6 +1304,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
             output.c.data.insert(output.c.data.end(),s.host_output+begin,s.host_output+end);
         else s.copy.output(output.c.data.data()+begin,s.host_output+begin,(end-begin)*4);
     }
+#endif
 #else
     if(FHERMA_OUTPUT_APPEND)
         output.c.data.insert(output.c.data.end(),s.host_output,s.host_output+words);
