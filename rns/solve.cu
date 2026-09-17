@@ -1,5 +1,5 @@
 #ifndef FHERMA_CRT_PARTS
-#define FHERMA_CRT_PARTS 4
+#define FHERMA_CRT_PARTS 1
 #endif
 #ifndef FHERMA_RNS_TAIL
 #define FHERMA_RNS_TAIL 1
@@ -54,19 +54,31 @@ __device__ uint32_t multiply_mod(uint32_t a,uint32_t b,const SmallMod& modulus) 
     uint32_t result=uint32_t(product-quotient*modulus.p);
     return result>=modulus.p ? result-modulus.p : result;
 }
+// ABI coefficients are AoS. Transpose once so all 57 residue transforms
+// read a limb plane in contiguous warp-wide transactions.
+__global__ void transpose_inputs(const uint32_t* input,uint32_t* output,unsigned n) {
+    __shared__ uint32_t tile[32*33];
+    unsigned x=threadIdx.x&31,y=threadIdx.x>>5,base=blockIdx.x*32;
+    input+=blockIdx.y*n*AbiWords;output+=blockIdx.y*n*AbiWords;
+    for(unsigned dy=0;dy<32;dy+=8)
+        if(x<AbiWords && base+y+dy<n) tile[(y+dy)*33+x]=input[(base+y+dy)*AbiWords+x];
+    __syncthreads();
+    for(unsigned dy=0;dy<32;dy+=8)
+        if(y+dy<AbiWords && base+x<n) output[(y+dy)*n+base+x]=tile[x*33+y+dy];
+}
 __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
                              const Twiddle* twists,const Twiddle* powers,unsigned n,unsigned logn) {
     unsigned i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     unsigned prime_i=blockIdx.y%PrimeCount,poly=blockIdx.y/PrimeCount;
     SmallMod modulus=mods[prime_i];
-    const uint32_t* coefficient=input+(poly*n+i)*AbiWords;
+    const uint32_t* coefficient=input+poly*n*AbiWords+i;
     // Shoup accepts any a<2^32: its exact residual is <2p<2^32.
     // Independent partial sums avoid Horner's 28 dependent multiplies.
     uint32_t even=0,odd=0;
     #pragma unroll
     for(unsigned limb=0;limb<AbiWords;++limb) {
-        uint32_t term=shoup(coefficient[limb],powers[prime_i*AbiWords+limb],modulus.p);
+        uint32_t term=shoup(coefficient[limb*n],powers[prime_i*AbiWords+limb],modulus.p);
         if(limb&1) odd=add_mod(odd,term,modulus.p);
         else even=add_mod(even,term,modulus.p);
     }
@@ -214,7 +226,7 @@ void check(cudaError_t status,const char* operation) {
 struct State {
     HostCopyPool copy;
     unsigned n=0,logn=0;
-    uint32_t *input=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
+    uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
     uint32_t *q=nullptr,*product_mod_q=nullptr,*host_input=nullptr,*host_output=nullptr;
     SmallMod* mods=nullptr;
     Twiddle *forward=nullptr,*inverse=nullptr,*scale=nullptr,*small_forward=nullptr,*small_inverse=nullptr,*tail_forward=nullptr,*tail_inverse=nullptr,*input_powers=nullptr;
@@ -232,7 +244,7 @@ struct State {
         if(graph) cudaGraphExecDestroy(graph);
         if(stream) cudaStreamDestroy(stream);
 #endif
-        cudaFree(input);cudaFree(ab);cudaFree(c);cudaFree(bases);cudaFree(scratch);
+        cudaFree(input);cudaFree(input_soa);cudaFree(ab);cudaFree(c);cudaFree(bases);cudaFree(scratch);
         cudaFree(q);cudaFree(product_mod_q);cudaFree(mods);cudaFree(forward);cudaFree(inverse);
         cudaFree(scale);cudaFree(small_forward);cudaFree(small_inverse);cudaFree(tail_forward);cudaFree(tail_inverse);cudaFree(input_powers);
         cudaFreeHost(host_input);cudaFreeHost(host_output);
@@ -252,7 +264,9 @@ template<class T> void upload(T*& destination,const std::vector<T>& source) {
 }
 void launch_rns(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
-    prepare_rns<<<full,128,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn);
+    dim3 abi_tiles((s.n+31)/32,2);
+    transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n);
+    prepare_rns<<<full,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.n,s.logn);
     mark(s,2,stream);
     unsigned first=1;
     if(s.n>=Tile) {
@@ -331,6 +345,7 @@ void* fherma_init(const fherma::Point& p) {
     }
     size_t bytes=size_t(p.N)*rns::AbiWords*4;
     check(cudaMalloc(&s->input,2*bytes),"allocate ABI buffers");
+    check(cudaMalloc(&s->input_soa,2*bytes),"allocate limb-plane inputs");
     check(cudaMalloc(&s->ab,size_t(2)*rns::PrimeCount*p.N*4),"allocate RNS operands");
     check(cudaMalloc(&s->c,size_t(rns::PrimeCount)*p.N*4),"allocate RNS inverse");
     check(cudaMallocHost(reinterpret_cast<void**>(&s->host_input),2*bytes),"pinned RNS inputs");
