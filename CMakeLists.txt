@@ -60,5 +60,6 @@ if(DEFINED ENV{CUPQC_SDK_DIR})
     $ENV{CUPQC_SDK_DIR}/include
     $ENV{CUPQC_SDK_DIR}/include/cupqc)
   target_link_libraries(solution PRIVATE
-    $ENV{CUPQC_SDK_DIR}/lib/libcupqc-bigint.a)
+    $ENV{CUPQC_SDK_DIR}/lib/libcupqc-bigint.a
+    $ENV{CUPQC_SDK_DIR}/lib/libcupqc-ntt.a)
 endif()

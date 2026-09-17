@@ -1,5 +1,14 @@
+#ifndef FHERMA_LIBRARY_NTT
+#define FHERMA_LIBRARY_NTT 1
+#endif
+#ifndef __CUDACC__
+// The CPU adapter cannot execute cuPQC's device-LTO NTT. It only validates
+// our native fallback; the library integration requires real GPU checking.
+#undef FHERMA_LIBRARY_NTT
+#define FHERMA_LIBRARY_NTT 0
+#endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 1
+#define FHERMA_HOST_PROFILE 0
 #endif
 #ifndef FHERMA_OVERLAP_PREPARE
 #define FHERMA_OVERLAP_PREPARE 1
@@ -62,6 +71,9 @@
 #include <memory>
 #include <cstring>
 #include <chrono>
+#if FHERMA_LIBRARY_NTT
+#include "rns/library_ntt.h"
+#endif
 
 namespace {
 using namespace rns;
@@ -286,6 +298,7 @@ __global__ void fused_tail_rns(const uint32_t* source,uint32_t* destination,cons
     destination[2*t]=tile[offset+2*k];destination[2*t+1]=tile[offset+2*k+1];
 }
 __device__ unsigned natural_index(unsigned i,unsigned n) {
+    if(FHERMA_LIBRARY_NTT && n==32768) return i;
     return FHERMA_RNS_TAIL && n==32768 ? ((i&31)*1024+(i>>5)) : i;
 }
 __global__ void product_rns(const uint32_t* ab,uint32_t* c,const SmallMod* mods,unsigned n,unsigned logn) {
@@ -387,6 +400,9 @@ void check(cudaError_t status,const char* operation) {
 }
 struct State {
     HostCopyPool copy;
+#if FHERMA_LIBRARY_NTT
+    rns_library::Tables library;
+#endif
     unsigned n=0,logn=0;
     bool overlap_input=false;
     uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
@@ -451,6 +467,16 @@ void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stre
 }
 void launch_rns(State& s,cudaStream_t stream=nullptr) {
     dim3 full((s.n+127)/128,2*PrimeCount),half((s.n/2+127)/128,2*PrimeCount);
+#if FHERMA_LIBRARY_NTT
+    if(s.n==32768) {
+        if(!s.overlap_input) launch_input_chunk(s,0,s.n,stream);
+        s.library.launch(s.ab,s.c,s.mods,stream);
+        unsigned crt_blocks=(s.n+CrtOutputs-1)/CrtOutputs;
+        reconstruct_rns<<<crt_blocks,128,0,stream>>>(s.c,s.input,s.mods,s.scale,s.bases,s.q,s.product_mod_q,s.n);
+        check(cudaGetLastError(),"cuPQC NTT and CRT kernels");
+        return;
+    }
+#endif
     uint32_t* prepared=s.ab;
     if(s.overlap_input) {
         dim3 permutation(32,2*PrimeCount);
@@ -536,13 +562,16 @@ void* fherma_init(const fherma::Point& p) {
     upload(s->mods,constants.mods);upload(s->bases,constants.bases_mod_q);
     constants.product_mod_q.resize(rns::AccumWords,0);
     upload(s->product_mod_q,constants.product_mod_q);upload(s->q,p.q.data);
-    if(FHERMA_RNS_TAIL && p.N==32768) {
+    if(FHERMA_RNS_TAIL && p.N==32768 && !FHERMA_LIBRARY_NTT) {
         auto original=constants.scale;
         for(unsigned pi=0;pi<rns::PrimeCount;++pi)
             for(unsigned i=0;i<p.N;++i)
                 constants.scale[pi*p.N+i]=original[pi*p.N+(i&31)*1024+(i>>5)];
     }
     upload(s->forward,constants.forward);upload(s->inverse,constants.inverse);upload(s->scale,constants.scale);
+#if FHERMA_LIBRARY_NTT
+    if(p.N==32768) s->library.init(constants.mods,s->mods,s->forward,s->inverse);
+#endif
     upload(s->small_forward,constants.small_forward);upload(s->small_inverse,constants.small_inverse);
     if(FHERMA_RNS_TAIL && p.N==32768) {
         std::vector<rns::Twiddle> forward_tail(size_t(rns::PrimeCount)*p.N),inverse_tail(forward_tail.size());
