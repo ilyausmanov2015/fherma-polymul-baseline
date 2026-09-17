@@ -1,3 +1,6 @@
+#ifndef FHERMA_TRANSFER_PROBE
+#define FHERMA_TRANSFER_PROBE 1
+#endif
 #ifndef FHERMA_INTERLEAVED_INPUT
 #define FHERMA_INTERLEAVED_INPUT 0
 #endif
@@ -5,7 +8,7 @@
 #define FHERMA_INPUT_COPY_GRAPH 0
 #endif
 #ifndef FHERMA_PIPELINE_PROFILE
-#define FHERMA_PIPELINE_PROFILE 0
+#define FHERMA_PIPELINE_PROFILE 1
 #endif
 #ifndef FHERMA_PREPARE_VECTOR
 #define FHERMA_PREPARE_VECTOR 0
@@ -119,7 +122,7 @@
 #define FHERMA_PAIRED_INPUT 1
 #endif
 #ifndef FHERMA_HOST_PROFILE
-#define FHERMA_HOST_PROFILE 0
+#define FHERMA_HOST_PROFILE 1
 #endif
 #ifndef FHERMA_HUGE_OUTPUT
 #define FHERMA_HUGE_OUTPUT 0
@@ -1076,6 +1079,12 @@ struct State {
 #endif
 #if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
     cudaEvent_t prepare_profile[2*FHERMA_PIPELINE_INPUT]{};
+    cudaEvent_t upload_profile[2*FHERMA_PIPELINE_INPUT]{};
+    cudaEvent_t download_start[FHERMA_PIPELINE_OUTPUT]{};
+    unsigned profile_run=0;
+#endif
+#if FHERMA_TRANSFER_PROBE && defined(__CUDACC__)
+    cudaEvent_t probe_events[2]{};
 #endif
     ~State() {
 #if defined(__CUDACC__) && FHERMA_INPUT_GRAPH && FHERMA_GRAPH
@@ -1100,6 +1109,11 @@ struct State {
 #endif
 #if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
         for(auto event:prepare_profile) if(event) cudaEventDestroy(event);
+        for(auto event:upload_profile) if(event) cudaEventDestroy(event);
+        for(auto event:download_start) if(event) cudaEventDestroy(event);
+#endif
+#if FHERMA_TRANSFER_PROBE && defined(__CUDACC__)
+        for(auto event:probe_events) if(event) cudaEventDestroy(event);
 #endif
         cudaFree(input);cudaFree(input_soa);cudaFree(ab);cudaFree(c);cudaFree(bases);cudaFree(scratch);
         cudaFree(q);cudaFree(product);cudaFree(mods);cudaFree(forward);cudaFree(inverse);
@@ -1406,8 +1420,14 @@ void* fherma_init(const fherma::Point& p) {
     for(auto& event:s->events) check(cudaEventCreate(&event),"RNS profile event");
 #endif
 #if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
-    static_assert(FHERMA_GRAPH && FHERMA_MAPPED_INPUT && FHERMA_PIPELINE_INPUT>1 && FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_INPUT_GRAPH && !FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE,"diagnose the staged mapped pipeline");
+    static_assert(FHERMA_GRAPH && FHERMA_HOST_PROFILE && FHERMA_PIPELINE_INPUT>1 && FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_INPUT_GRAPH && !FHERMA_INPUT_COPY_GRAPH && !FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE && !FHERMA_OUTPUT_WORKER_PIPELINE,"diagnose mapped or staged input with ordinary output parts");
     for(auto& event:s->prepare_profile) check(cudaEventCreate(&event),"mapped prepare profile event");
+    for(auto& event:s->upload_profile) check(cudaEventCreate(&event),"input DMA profile event");
+    for(auto& event:s->download_start) check(cudaEventCreate(&event),"output DMA profile event");
+#endif
+#if FHERMA_TRANSFER_PROBE && defined(__CUDACC__)
+    static_assert(FHERMA_PIPELINE_PROFILE && FHERMA_OUTPUT_SIGNAL,"transfer probes require pipeline diagnostics and output completion");
+    for(auto& event:s->probe_events) check(cudaEventCreate(&event),"isolated DMA probe event");
 #endif
 #if FHERMA_GRAPH
     if(s->overlap_input) {
@@ -1534,6 +1554,12 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_HOST_PROFILE
     [[maybe_unused]] auto host_run_start=std::chrono::steady_clock::now();
 #endif
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+    const unsigned profile_run=++s.profile_run;
+    auto host_stamp=[&] {return std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-host_run_start).count();};
+    double host_input_ready[FHERMA_PIPELINE_INPUT]{},host_input_enqueued[FHERMA_PIPELINE_INPUT]{};
+    double host_output_wait[FHERMA_PIPELINE_OUTPUT]{},host_output_ready[FHERMA_PIPELINE_OUTPUT]{},host_output_copied[FHERMA_PIPELINE_OUTPUT]{};
+#endif
 #if FHERMA_ASYNC_OUTPUT_ALLOC
     std::optional<HostOutputAllocator::Work> allocation_task;
     auto prepare_output=[&] {
@@ -1565,6 +1591,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     unsigned input_part=0;
     copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,input.a.data.data(),input.b.data.data(),words,
         [&](size_t begin,const uint32_t* a,const uint32_t* b,size_t count) {
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+            host_input_ready[input_part]=host_stamp();
+#endif
 #if defined(__CUDACC__) && FHERMA_INPUT_GRAPH
             if(s.input_graph) {
                 unsigned part=input_part++;s.input_completion.publish(part);
@@ -1575,21 +1604,33 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #endif
             if((FHERMA_MAPPED_INPUT || FHERMA_INPUT_COPY_GRAPH) && s.overlap_input) {
                 check(cudaGraphLaunch(s.prepare_graph[input_part],s.stream),"execute prepared input chunk");
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+                host_input_enqueued[input_part]=host_stamp();
+#endif
                 ++input_part;
                 return;
             }
             auto transfer=s.overlap_input ? s.transfer_stream : s.stream;
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+            check(cudaEventRecord(s.upload_profile[2*input_part],transfer),"input DMA starts");
+#endif
             if(FHERMA_PAIRED_INPUT && s.overlap_input) {
                 check(cudaMemcpyAsync(s.input+2*begin,a,2*count*4,cudaMemcpyHostToDevice,transfer),"RNS paired pipeline H2D");
             } else {
                 check(cudaMemcpyAsync(s.input+begin,a,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline A H2D");
                 check(cudaMemcpyAsync(s.input+words+begin,b,count*4,cudaMemcpyHostToDevice,transfer),"RNS pipeline B H2D");
             }
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+            check(cudaEventRecord(s.upload_profile[2*input_part+1],transfer),"input DMA ends");
+#endif
             if(s.overlap_input) {
                 check(cudaEventRecord(s.input_ready[input_part],transfer),"RNS input segment uploaded");
                 check(cudaStreamWaitEvent(s.stream,s.input_ready[input_part],0),"RNS prepare waits for input segment");
                 check(cudaGraphLaunch(s.prepare_graph[input_part],s.stream),"execute RNS input chunk");
             }
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+            host_input_enqueued[input_part]=host_stamp();
+#endif
             ++input_part;
         });
 #else
@@ -1615,6 +1656,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_OUTPUT_GRAPH
         for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
             size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+            check(cudaEventRecord(s.download_start[part],s.stream),"output DMA starts");
+#endif
             check(cudaMemcpyAsync(s.host_output+begin,s.input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s.stream),"RNS pipeline D2H");
 #if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
             check(cudaEventRecord(s.output_ready[part],s.stream),"profile output segment");
@@ -1666,6 +1710,9 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_OUTPUT>1
 #if !FHERMA_OUTPUT_WORKER_PIPELINE
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+        host_output_wait[0]=host_stamp();
+#endif
         wait_output_part(s,0);
 #endif
 #elif FHERMA_GRAPH
@@ -1685,11 +1732,20 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
         [&](unsigned part) {wait_output_part(s,part);});
 #else
     for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+        if(part) host_output_wait[part]=host_stamp();
+#endif
         wait_output_part(s,part);
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+        host_output_ready[part]=host_stamp();
+#endif
         size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
         if(FHERMA_OUTPUT_APPEND)
             output.c.data.insert(output.c.data.end(),s.host_output+begin,s.host_output+end);
         else s.copy.output(output.c.data.data()+begin,s.host_output+begin,(end-begin)*4);
+#if FHERMA_PIPELINE_PROFILE && defined(__CUDACC__)
+        host_output_copied[part]=host_stamp();
+#endif
     }
 #endif
 #else
@@ -1747,6 +1803,75 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part)
         std::fprintf(stderr," output%u=%.3f",part,interval(s.events[6],s.output_ready[part]));
     std::fprintf(stderr,"\n");
+#if FHERMA_PIPELINE_PROFILE
+    if(s.overlap_input) {
+        auto origin=FHERMA_MAPPED_INPUT ? s.prepare_profile[0] : s.upload_profile[0];
+        auto segment=[&](const char* kind,unsigned part,cudaEvent_t begin,cudaEvent_t end) {
+            std::fprintf(stderr,"GPU_SEGMENT run=%u kind=%s part=%u start_us=%.3f end_us=%.3f\n",
+                profile_run,kind,part,interval(origin,begin),interval(origin,end));
+        };
+        for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
+            if(!FHERMA_MAPPED_INPUT) segment("h2d",part,s.upload_profile[2*part],s.upload_profile[2*part+1]);
+            segment("prepare",part,s.prepare_profile[2*part],s.prepare_profile[2*part+1]);
+            std::fprintf(stderr,"CPU_SEGMENT run=%u kind=input part=%u ready_us=%.3f enqueued_us=%.3f\n",
+                profile_run,part,host_input_ready[part],host_input_enqueued[part]);
+        }
+        segment("forward",0,s.events[2],s.events[3]);
+        segment("product",0,s.events[3],s.events[4]);
+        segment("inverse",0,s.events[4],s.events[5]);
+        segment("crt",0,s.events[5],s.events[6]);
+        for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+            segment("d2h",part,s.download_start[part],s.output_ready[part]);
+            std::fprintf(stderr,"CPU_SEGMENT run=%u kind=output part=%u wait_us=%.3f ready_us=%.3f copied_us=%.3f\n",
+                profile_run,part,host_output_wait[part],host_output_ready[part],host_output_copied[part]);
+        }
+    }
+#endif
+#endif
+#if FHERMA_TRANSFER_PROBE && defined(__CUDACC__)
+    // The ordinary owning output vector is complete. Only owned staging and
+    // device scratch are overwritten by the following diagnostic copies.
+    // No probe data or elapsed work is retained for a future answer.
+    std::vector<uint32_t> probe_sink(words);
+    auto probe=[&](const char* kind,unsigned parts,bool cached,bool flags,bool consume,unsigned repeat) {
+        bool upload=kind[0]=='h';
+        if(cached) s.copy.output(probe_sink.data(),s.host_output,bytes);
+        if(flags) s.completion.begin();
+        auto started=std::chrono::steady_clock::now();
+        check(cudaEventRecord(s.probe_events[0],s.stream),"DMA probe starts");
+        size_t total=upload ? 2*bytes : bytes;
+        for(unsigned part=0;part<parts;++part) {
+            size_t begin=total*part/parts,end=total*(part+1)/parts;
+            auto* device=reinterpret_cast<char*>(s.input)+begin;
+            auto* host=reinterpret_cast<char*>(upload ? s.host_input : s.host_output)+begin;
+            check(cudaMemcpyAsync(upload ? device : host,upload ? host : device,end-begin,
+                upload ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToHost,s.stream),"isolated DMA probe");
+            if(flags) s.completion.record(s.stream,part);
+        }
+        check(cudaEventRecord(s.probe_events[1],s.stream),"DMA probe ends");
+        if(consume) for(unsigned part=0;part<parts;++part) {
+            s.completion.wait(s.stream,part);
+            size_t begin=words*part/parts,end=words*(part+1)/parts;
+            s.copy.output(probe_sink.data()+begin,s.host_output+begin,(end-begin)*4);
+        }
+        check(cudaStreamSynchronize(s.stream),"DMA probe complete");
+        double wall_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-started).count();
+        float milliseconds=0;check(cudaEventElapsedTime(&milliseconds,s.probe_events[0],s.probe_events[1]),"DMA probe time");
+        std::fprintf(stderr,"DMA_PROBE run=%u kind=%s parts=%u cached=%u flags=%u consume=%u repeat=%u bytes=%zu gpu_us=%.3f host_us=%.3f\n",
+            profile_run,kind,parts,unsigned(cached),unsigned(flags),unsigned(consume),repeat,total,1000.0*milliseconds,wall_us);
+    };
+    for(unsigned repeat=0;repeat<2;++repeat) {
+        probe("h2d",1,false,false,false,repeat);
+        probe("h2d",FHERMA_PIPELINE_INPUT,false,false,false,repeat);
+        for(unsigned parts:{1u,unsigned(FHERMA_PIPELINE_OUTPUT)}) {
+            probe("d2h",parts,true,false,false,repeat);
+            probe("d2h",parts,false,false,false,repeat);
+        }
+        if(s.completion.enabled()) {
+            probe("d2h",FHERMA_PIPELINE_OUTPUT,true,true,false,repeat);
+            probe("d2h",FHERMA_PIPELINE_OUTPUT,true,true,true,repeat);
+        }
+    }
 #endif
     return output;
     } catch(...) {
