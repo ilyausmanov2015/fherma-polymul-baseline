@@ -6,7 +6,7 @@ import time
 
 from fherma.api import Api
 from fherma.config import load
-from fherma_submit import history
+from fherma_submit import history,read_api
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,7 +37,7 @@ def main():
                         last = line
             done = False
             for rid in ids:
-                result = api._request('GET', '/runs/' + rid)
+                result = read_api(api, '/runs/' + rid)
                 (ROOT / 'local' / ('run-' + rid + '.json')).write_text(json.dumps(result, indent=2))
                 run = result.get('run', result)
                 summary = {k: run.get(k) for k in ['id','status','progress','cases','passed','failure']}

@@ -12,6 +12,7 @@ import sys
 import time
 from fherma.api import Api
 from fherma.config import load
+from fherma_submit import read_api
 
 ROOT=Path(__file__).resolve().parents[1]
 TERMINAL={'finished','failed','cancelled','error','aborted','expired'}
@@ -30,7 +31,7 @@ if args.wait_run:
     api=Api(load())
     try:
         while True:
-            result=api._request('GET','/runs/'+args.wait_run)
+            result=read_api(api,'/runs/'+args.wait_run)
             status=result['run']['status']
             print(json.dumps({'waiting_for':args.wait_run,'status':status}),flush=True)
             if status in TERMINAL: break

@@ -16,6 +16,7 @@ import subprocess
 import httpx
 from fherma.api import Api
 from fherma.config import load
+from fherma.errors import NetworkError
 
 ROOT=Path(__file__).resolve().parents[1]
 KERNEL='polynomial-multiplication'
@@ -37,6 +38,17 @@ def read_get(client, url, **kwargs):
             response.raise_for_status()
             return response
         except httpx.TransportError:
+            if attempt==2: raise
+            time.sleep(1+attempt)
+        except httpx.HTTPStatusError as error:
+            if attempt==2 or error.response.status_code not in (429,500,502,503,504): raise
+            time.sleep(1+attempt)
+
+def read_api(api,path):
+    for attempt in range(3):
+        try:
+            return api._request('GET',path)
+        except NetworkError:
             if attempt==2: raise
             time.sleep(1+attempt)
 
