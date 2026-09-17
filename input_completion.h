@@ -39,6 +39,9 @@ public:
         cudaGraph_t graph=nullptr;auto ended=cudaStreamEndCapture(stream,&graph);
         if(graph) cudaGraphDestroy(graph);
         if(status==CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED || status==CUDA_ERROR_NOT_SUPPORTED) {
+            if(ended!=cudaSuccess && ended!=cudaErrorStreamCaptureInvalidated)
+                runtime_check(ended,"discard unsupported input capture");
+            (void)cudaGetLastError();
             std::fprintf(stderr,"INPUT_GRAPH supported=0 capture_unsupported=1\n");return false;
         }
         driver_check(status,"capture input wait probe");runtime_check(ended,"finish input wait probe");

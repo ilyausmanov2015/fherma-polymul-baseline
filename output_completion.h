@@ -46,6 +46,9 @@ public:
             auto ended=cudaStreamEndCapture(stream,&definition);
             if(definition) cudaGraphDestroy(definition);
             if(status==CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED || status==CUDA_ERROR_NOT_SUPPORTED) {
+                if(ended!=cudaSuccess && ended!=cudaErrorStreamCaptureInvalidated)
+                    runtime_check(ended,"discard unsupported completion capture");
+                (void)cudaGetLastError(); // Clear only the expected capture error.
                 std::fprintf(stderr,"OUTPUT_COMPLETION supported=0 capture_unsupported=1\n");return;
             }
             driver_check(status,"capture completion probe write");
