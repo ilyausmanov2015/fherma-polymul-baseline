@@ -272,6 +272,17 @@ public:
 #ifdef __linux__
         cpu_set_t allowed; int caller=sched_getcpu();
         if(caller>=0 && sched_getaffinity(0,sizeof(allowed),&allowed)==0) {
+#if FHERMA_HOST_PROFILE
+            for(int cpu=0;cpu<CPU_SETSIZE;++cpu) if(CPU_ISSET(cpu,&allowed)) {
+                std::string path="/sys/devices/system/cpu/cpu"+std::to_string(cpu)+"/topology/";
+                std::string core,package,siblings;
+                std::ifstream(path+"core_id")>>core;
+                std::ifstream(path+"physical_package_id")>>package;
+                std::ifstream(path+"thread_siblings_list")>>siblings;
+                std::fprintf(stderr,"CPU_TOPOLOGY cpu=%d package=%s core=%s siblings=%s\n",
+                    cpu,package.c_str(),core.c_str(),siblings.c_str());
+            }
+#endif
 #if FHERMA_FIRST_CPU
             for(int cpu=0;cpu<CPU_SETSIZE;++cpu)
                 if(CPU_ISSET(cpu,&allowed)) { caller=cpu;break; }
