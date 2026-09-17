@@ -68,7 +68,7 @@
 #define FHERMA_RNS_RADIX4 1
 #endif
 #ifndef FHERMA_RNS_GROUPED
-#define FHERMA_RNS_GROUPED 0
+#define FHERMA_RNS_GROUPED 1
 #endif
 #ifndef FHERMA_CRT_PARTS
 #define FHERMA_CRT_PARTS 4
@@ -154,21 +154,18 @@ __global__ void transpose_inputs(const uint32_t* input,uint32_t* output,unsigned
     for(unsigned dy=0;dy<32;dy+=8)
         if(y+dy<AbiWords && base+x<end) output[(y+dy)*n+base+x]=tile[x*33+y+dy];
 }
-__global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
-                             const Twiddle* twists,const Twiddle* powers,const Roots* roots,unsigned n,unsigned logn,
-                             unsigned begin=0,unsigned count=0,bool natural=false) {
-    unsigned i=begin+blockIdx.x*blockDim.x+threadIdx.x;
-    if(i>=(count ? begin+count : n)) return;
-    unsigned pi=blockIdx.y%ModCount,poly=blockIdx.y/ModCount;uint32_t p=mods[pi].p;
-    input+=poly*n*AbiWords;uint32_t z[4];
+__device__ inline void prepare_coefficient(const uint32_t* input,unsigned stride,uint32_t* ab,
+    const Twiddle* twists,const Twiddle* powers,const Roots* roots,unsigned n,unsigned logn,
+    unsigned i,unsigned pi,unsigned poly,uint32_t p,bool natural) {
+    uint32_t z[4];
     #pragma unroll
     for(unsigned component=0;component<4;++component) {
         unsigned shift=PartBits*component,base=shift/32,bits=shift%32;
         uint32_t even=0,odd=0;
         #pragma unroll
         for(unsigned limb=0;limb<PartWords;++limb) {
-            uint32_t word=input[(base+limb)*n+i]>>bits;
-            if(bits) word|=input[(base+limb+1)*n+i]<<(32-bits);
+            uint32_t word=input[(base+limb)*stride]>>bits;
+            if(bits) word|=input[(base+limb+1)*stride]<<(32-bits);
             if(limb==PartWords-1) word&=(uint32_t(1)<<25)-1;
             uint32_t term=shoup(word,powers[pi*PartWords+limb],p);
             if(limb&1) odd=add_mod(odd,term,p);else even=add_mod(even,term,p);
@@ -182,6 +179,33 @@ __global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* m
     #pragma unroll
     for(unsigned channel=0;channel<4;++channel)
         ab[(poly*PrimeCount+channel*ModCount+pi)*n+output_i]=shoup(mixed[channel],twists[pi*n+i],p);
+}
+__global__ void prepare_rns(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
+                             const Twiddle* twists,const Twiddle* powers,const Roots* roots,unsigned n,unsigned logn,
+                             unsigned begin=0,unsigned count=0,bool natural=false) {
+    unsigned i=begin+blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=(count ? begin+count : n)) return;
+    unsigned pi=blockIdx.y%ModCount,poly=blockIdx.y/ModCount;
+    prepare_coefficient(input+poly*n*AbiWords+i,n,ab,twists,powers,roots,n,logn,i,pi,poly,mods[pi].p,natural);
+}
+// Four warps share one AoS tile, each warp evaluating a different prime.
+__global__ void prepare_grouped(const uint32_t* input,uint32_t* ab,const SmallMod* mods,
+                             const Twiddle* twists,const Twiddle* powers,const Roots* roots,unsigned n,unsigned logn,
+                             unsigned begin=0,unsigned count=0,bool natural=false,bool packed=false) {
+    __shared__ uint32_t tile[32*29];
+    unsigned t=threadIdx.x,lane=t&31,warp=t>>5;
+    unsigned pi=(blockIdx.y%(ModCount/4))*4+warp,poly=blockIdx.y/(ModCount/4);
+    unsigned base=begin+blockIdx.x*32,end=count ? begin+count : n;
+    input+=poly*(packed ? count : n)*AbiWords;
+    #pragma unroll
+    for(unsigned index=t;index<32*AbiWords;index+=128) {
+        unsigned row=index/AbiWords,word=index%AbiWords;
+        if(base+row<end) tile[row*29+word]=input[(base+row-(packed ? begin : 0))*AbiWords+word];
+    }
+    __syncthreads();
+    unsigned i=base+lane;
+    if(i>=end) return;
+    prepare_coefficient(tile+lane*29,1,ab,twists,powers,roots,n,logn,i,pi,poly,mods[pi].p,natural);
 }
 // The chunk converter writes natural order while H2D is still active.
 // Permute only after all chunks are ready, using coalesced loads and stores.
@@ -624,8 +648,13 @@ void launch_input_chunk(State& s,unsigned begin,unsigned count,cudaStream_t stre
     bool paired=FHERMA_MAPPED_INPUT || FHERMA_PAIRED_INPUT;
     const uint32_t* source=FHERMA_MAPPED_INPUT ? s.host_input : s.input;
     if(paired) source+=size_t(2)*begin*AbiWords;
+    if(FHERMA_RNS_GROUPED) {
+        dim3 groups((count+31)/32,2*(ModCount/4));
+        prepare_grouped<<<groups,128,0,stream>>>(source,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true,paired);
+    } else {
     transpose_inputs<<<abi_tiles,256,0,stream>>>(source,s.input_soa,s.n,begin,count,paired);
     prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,begin,count,true);
+    }
     check(cudaGetLastError(),"RNS input chunk kernels");
 }
 template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
@@ -640,8 +669,13 @@ template<bool Lazy> void launch_rns_impl(State& s,cudaStream_t stream=nullptr) {
       }
     } else {
         dim3 abi_tiles((s.n+31)/32,2),residues((s.n+127)/128,2*ModCount);
+        if(FHERMA_RNS_GROUPED) {
+            dim3 groups((s.n+31)/32,2*(ModCount/4));
+            prepare_grouped<<<groups,128,0,stream>>>(s.input,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
+        } else {
         transpose_inputs<<<abi_tiles,256,0,stream>>>(s.input,s.input_soa,s.n);
         prepare_rns<<<residues,128,0,stream>>>(s.input_soa,s.ab,s.mods,s.forward,s.input_powers,s.roots,s.n,s.logn,0,0,dif_forward);
+        }
     }
     mark(s,2,stream);
     unsigned first=1;
@@ -741,7 +775,7 @@ void* fherma_init(const fherma::Point& p) {
 #endif
     auto s=std::make_unique<State>();s->n=p.N;s->logn=__builtin_ctz(p.N);
     s->overlap_input=FHERMA_OVERLAP_PREPARE && FHERMA_PIPELINE_INPUT>1 && FHERMA_RNS_TAIL && p.N==32768;
-    static_assert(!FHERMA_OVERLAP_PREPARE || (!FHERMA_PROFILE && !FHERMA_RNS_GROUPED),"chunk prepare uses SoA without diagnostic events");
+    static_assert(!FHERMA_OVERLAP_PREPARE || !FHERMA_PROFILE,"chunk prepare cannot use diagnostic GPU events");
     static_assert(FHERMA_PIPELINE_INPUT>0 && (32768%FHERMA_PIPELINE_INPUT)==0,"input chunks must contain whole coefficients");
     auto constants=quartic::setup(p.N,delta);
     s->lazy_ntt=FHERMA_LAZY_NTT && constants.mods[0].p<(uint32_t(1)<<30);
