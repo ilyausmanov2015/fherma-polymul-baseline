@@ -13,6 +13,7 @@ int main() {
         std::memcpy(expected.data()+dst,in.data()+src,n);
         if(cached) host_copy_cached(got.data()+dst,in.data()+src,n);
         else host_copy_bytes(got.data()+dst,in.data()+src,n);
+        host_discard_cached_reads(in.data()+src,n);
         if(got!=expected) {
             std::fprintf(stderr,"copy mismatch: bytes=%zu src_offset=%zu dst_offset=%zu\n",n,src,dst);
             return 1;
@@ -20,6 +21,7 @@ int main() {
     }
 #if defined(__x86_64__) && defined(__GNUC__)
     std::printf("Host copy: 650 streaming/cached cases passed; AVX-512 available=%d\n",bool(__builtin_cpu_supports("avx512f")));
+    std::printf("Cache discard: CLFLUSHOPT available=%d\n",bool(__builtin_cpu_supports("clflushopt")));
 #else
     std::puts("Host copy: 650 streaming/cached cases passed; portable fallback");
 #endif

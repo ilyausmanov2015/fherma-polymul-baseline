@@ -51,6 +51,9 @@
 #ifndef FHERMA_SELECTIVE_OUTPUT_WAKE
 #define FHERMA_SELECTIVE_OUTPUT_WAKE 0
 #endif
+#ifndef FHERMA_FLUSH_OUTPUT_SOURCE
+#define FHERMA_FLUSH_OUTPUT_SOURCE 0
+#endif
 // Persistent workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
 class HostCopyPool {
@@ -121,6 +124,9 @@ class HostCopyPool {
             host_copy_cached(job.out+begin,job.a+begin,end-begin);
 #else
             std::memcpy(job.out+begin,job.a+begin,end-begin);
+#endif
+#if FHERMA_FLUSH_OUTPUT_SOURCE
+            host_discard_cached_reads(job.a+begin,end-begin);
 #endif
         }
     }

@@ -55,3 +55,20 @@ inline void host_copy_cached(void* out,const void* in,size_t bytes) {
 #endif
     std::memcpy(out,in,bytes);
 }
+
+#if defined(__x86_64__) && defined(__GNUC__)
+__attribute__((target("clflushopt"))) inline void discard_cached_reads_x86(const void* source,size_t bytes) {
+    uintptr_t first=(reinterpret_cast<uintptr_t>(source)+63)&~uintptr_t(63);
+    uintptr_t end=(reinterpret_cast<uintptr_t>(source)+bytes)&~uintptr_t(63);
+    for(uintptr_t address=first;address<end;address+=64)
+        _mm_clflushopt(reinterpret_cast<void*>(address));
+    _mm_sfence(); // Complete cache maintenance before publishing CPU completion.
+}
+#endif
+inline void host_discard_cached_reads(const void* source,size_t bytes) {
+#if defined(__x86_64__) && defined(__GNUC__)
+    if(bytes>=64 && __builtin_cpu_supports("clflushopt")) discard_cached_reads_x86(source,bytes);
+#else
+    (void)source;(void)bytes;
+#endif
+}
