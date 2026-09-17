@@ -26,6 +26,9 @@
 #ifndef FHERMA_PARALLEL_COPY
 #define FHERMA_PARALLEL_COPY 1
 #endif
+#ifndef FHERMA_STREAM_COPY
+#define FHERMA_STREAM_COPY 1
+#endif
 
 // Exact negacyclic NTT baseline. All device modular arithmetic uses cuPQC.
 #include "fherma.h"

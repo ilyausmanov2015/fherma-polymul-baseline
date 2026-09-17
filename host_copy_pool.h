@@ -4,6 +4,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include "host_stream_copy.h"
 
 // Three sleeping workers plus the caller. Input-dependent copying remains
 // entirely within run(); setup creates only the persistent worker threads.
@@ -19,10 +20,10 @@ class HostCopyPool {
             unsigned half=rank%2; size_t begin=job.bytes*half/2,end=job.bytes*(half+1)/2;
             const char* source=rank<2 ? job.a : job.b;
             char* dest=job.out+(rank<2 ? 0 : job.bytes);
-            std::memcpy(dest+begin,source+begin,end-begin);
+            host_copy_bytes(dest+begin,source+begin,end-begin);
         } else {
             size_t begin=job.bytes*rank/4,end=job.bytes*(rank+1)/4;
-            std::memcpy(job.out+begin,job.a+begin,end-begin);
+            host_copy_bytes(job.out+begin,job.a+begin,end-begin);
         }
     }
     void worker(unsigned rank) {
