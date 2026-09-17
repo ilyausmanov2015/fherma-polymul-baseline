@@ -1,3 +1,6 @@
+#ifndef FHERMA_CRT_TILED_OUTPUT
+#define FHERMA_CRT_TILED_OUTPUT 1
+#endif
 #ifndef FHERMA_RNS_TILED_PREPARE
 #define FHERMA_RNS_TILED_PREPARE 1
 #endif
@@ -332,7 +335,7 @@ __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const 
         alpha+=partial_alpha[source]+uint32_t(next<fraction);fraction=next;
     }
 #else
-    if(i>=n) return;
+    if(i>=n && !FHERMA_CRT_TILED_OUTPUT) return;
 #endif
     // Setup proves |integer convolution| < P/4. The fixed-point error is
     // less than 57*2^31/2^64 < 1/4, so rounding the quotient is exact even
@@ -342,7 +345,21 @@ __global__ void reconstruct_rns(const uint32_t* residues,uint32_t* output,const 
     Big answer=fold_crt(accumulator,q);
     Big correction=fold_crt(Wide(product_mod_q,0).mul_scalar(nearest),q);
     answer=answer.sub_mod(correction,q);
+#if FHERMA_CRT_TILED_OUTPUT && FHERMA_CRT_PARTS==1
+    // A thread owns an ABI coefficient, but a warp writes adjacent words
+    // of that coefficient. Padding removes the shared AoS bank conflict.
+    __shared__ uint32_t output_tile[128*29];
+    #pragma unroll
+    for(unsigned limb=0;limb<AbiWords;++limb) output_tile[threadIdx.x*29+limb]=answer[limb];
+    __syncthreads();
+    #pragma unroll
+    for(unsigned word=threadIdx.x;word<128*AbiWords;word+=128) {
+        unsigned coefficient=word/AbiWords,limb=word%AbiWords,index=blockIdx.x*128+coefficient;
+        if(index<n) output[natural_index(index,n)*AbiWords+limb]=output_tile[coefficient*29+limb];
+    }
+#else
     answer.store(output,natural_index(i,n));
+#endif
 }
 void check(cudaError_t status,const char* operation) {
     if(status!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(status));
