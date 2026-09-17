@@ -2,7 +2,10 @@
 #define FHERMA_HARVEY_BITS 4
 #endif
 #ifndef FHERMA_HARVEY
-#define FHERMA_HARVEY 1
+#define FHERMA_HARVEY 0
+#endif
+#ifndef FHERMA_OUTPUT_GRAPH
+#define FHERMA_OUTPUT_GRAPH 1
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -1016,6 +1019,13 @@ void* fherma_init(const fherma::Point& p) {
     launch_rns(*s,s->stream);
 #if FHERMA_PIPELINE_OUTPUT<=1 && !FHERMA_MAPPED_OUTPUT
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture RNS D2H");
+#elif FHERMA_PIPELINE_OUTPUT>1 && FHERMA_OUTPUT_GRAPH
+    for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
+        size_t words=bytes/4,begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
+        check(cudaMemcpyAsync(s->host_output+begin,s->input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s->stream),"capture RNS output segment");
+        // The event must remain a real record node visible to host waits.
+        check(cudaEventRecordWithFlags(s->output_ready[part],s->stream,cudaEventRecordExternal),"capture RNS output completion");
+    }
 #endif
     mark(*s,7,s->stream);
     cudaGraph_t definition=nullptr;
@@ -1077,7 +1087,7 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     if(FHERMA_OUTPUT_SPARE) output.c.data.swap(s.spare_output);
 #if FHERMA_GRAPH
         check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
-#if FHERMA_PIPELINE_OUTPUT>1
+#if FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_OUTPUT_GRAPH
         for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
             size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
             check(cudaMemcpyAsync(s.host_output+begin,s.input+begin,(end-begin)*4,cudaMemcpyDeviceToHost,s.stream),"RNS pipeline D2H");

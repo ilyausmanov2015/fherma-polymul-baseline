@@ -45,3 +45,12 @@ directManagedMemAccessFromHost=0. Поэтому HMM для обычных mallo
 Это разные возможности CUDA:
 https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__UNIFIED.html
 https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/understanding-memory.html
+
+
+Повторная отдельная проверка графа только вывода на quartic backend:
+FHERMA_OUTPUT_GRAPH включает 8 D2H+external EventRecord в основной граф.
+Ввод остаётся прежним paired/4 chunks; изменение не смешивается с ранее
+проигравшими графами H2D. Мотивация — теперь восемь выходных частей вместо
+четырёх и более короткая GPU-арифметика. EventSynchronize каждой части
+сохранён, обычный владеющий output vector создаётся внутри run.
+https://docs.nvidia.com/cuda/archive/12.8.0/cuda-runtime-api/group__CUDART__EVENT.html
