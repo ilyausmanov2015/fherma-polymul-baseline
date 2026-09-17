@@ -1,8 +1,11 @@
+#ifndef FHERMA_INPUT_GRAPH
+#define FHERMA_INPUT_GRAPH 1
+#endif
 #ifndef FHERMA_ASYNC_OUTPUT_LATE
 #define FHERMA_ASYNC_OUTPUT_LATE 1
 #endif
 #ifndef FHERMA_INPUT_WORKER_PIPELINE
-#define FHERMA_INPUT_WORKER_PIPELINE 0
+#define FHERMA_INPUT_WORKER_PIPELINE 1
 #endif
 #ifndef FHERMA_OUTPUT_WORKER_PIPELINE
 #define FHERMA_OUTPUT_WORKER_PIPELINE 0
@@ -38,7 +41,7 @@
 #define FHERMA_CRT_PIPELINE 0
 #endif
 #ifndef FHERMA_PREPARE_PRIMES
-#define FHERMA_PREPARE_PRIMES 16
+#define FHERMA_PREPARE_PRIMES 4
 #endif
 #ifndef FHERMA_HARVEY_BITS
 #define FHERMA_HARVEY_BITS 3
@@ -47,7 +50,7 @@
 #define FHERMA_HARVEY 0
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
-#define FHERMA_OUTPUT_GRAPH 0
+#define FHERMA_OUTPUT_GRAPH 1
 #endif
 #ifndef FHERMA_DEFER_MAIN_PIN
 #define FHERMA_DEFER_MAIN_PIN 0
@@ -104,7 +107,7 @@
 #define FHERMA_MAPPED_OUTPUT 0
 #endif
 #ifndef FHERMA_MAPPED_INPUT
-#define FHERMA_MAPPED_INPUT 1
+#define FHERMA_MAPPED_INPUT 0
 #endif
 #ifndef FHERMA_QUARTIC_COMPACT_SCALE
 #define FHERMA_QUARTIC_COMPACT_SCALE 0
@@ -119,7 +122,7 @@
 #define FHERMA_RNS_TILED_PREPARE 1
 #endif
 #ifndef FHERMA_INPUT_WC
-#define FHERMA_INPUT_WC 1
+#define FHERMA_INPUT_WC 0
 #endif
 #ifndef FHERMA_STREAM_OUTPUT
 #define FHERMA_STREAM_OUTPUT 0
@@ -179,6 +182,9 @@
 #include <chrono>
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL && FHERMA_GRAPH
 #include "output_completion.h"
+#endif
+#if defined(__CUDACC__) && FHERMA_INPUT_GRAPH && FHERMA_GRAPH
+#include "input_completion.h"
 #endif
 
 namespace {
@@ -792,6 +798,10 @@ void check(cudaError_t status,const char* operation) {
     if(status!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(status));
 }
 struct State {
+#if defined(__CUDACC__) && FHERMA_INPUT_GRAPH && FHERMA_GRAPH
+    InputCompletion<FHERMA_PIPELINE_INPUT> input_completion;
+    cudaEvent_t input_root=nullptr;
+#endif
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL && FHERMA_GRAPH
     OutputCompletion<FHERMA_PIPELINE_OUTPUT> completion;
 #endif
@@ -804,7 +814,7 @@ struct State {
     // replacement inside its timed call; returned result ownership is unique.
     std::vector<uint32_t> spare_output;
     unsigned n=0,logn=0;
-    bool overlap_input=false,lazy_ntt=false;
+    bool overlap_input=false,lazy_ntt=false,input_graph=false;
     uint32_t *input=nullptr,*input_soa=nullptr,*ab=nullptr,*c=nullptr,*bases=nullptr,*scratch=nullptr;
     uint32_t *q=nullptr,*product=nullptr,*host_input=nullptr,*host_output=nullptr;
     uint32_t* mapped_input=nullptr; // Non-owning CUDA alias, not necessarily the host address.
@@ -826,6 +836,9 @@ struct State {
     cudaEvent_t events[8]{};
 #endif
     ~State() {
+#if defined(__CUDACC__) && FHERMA_INPUT_GRAPH && FHERMA_GRAPH
+        if(input_root) cudaEventDestroy(input_root);
+#endif
 #if FHERMA_GRAPH
         if(graph) cudaGraphExecDestroy(graph);
         for(auto executable:prepare_graph) if(executable) cudaGraphExecDestroy(executable);
@@ -1135,11 +1148,16 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaEventCreateWithFlags(&s->crt_join,cudaEventDisableTiming),"CRT branch join event");
 #endif
     check(cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking),"RNS stream");
+#if defined(__CUDACC__) && FHERMA_INPUT_GRAPH
+    static_assert(FHERMA_PIPELINE_INPUT>1 && FHERMA_OVERLAP_PREPARE && FHERMA_PAIRED_INPUT && FHERMA_OUTPUT_GRAPH && !FHERMA_CRT_PIPELINE && !FHERMA_MAPPED_INPUT,"input graph needs paired staged input and captured output");
+    if(s->overlap_input) s->input_graph=s->input_completion.init(s->stream);
+    if(s->input_graph) check(cudaEventCreateWithFlags(&s->input_root,cudaEventDisableTiming),"input graph root event");
+#endif
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
     static_assert(FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_CRT_PIPELINE,"completion flags require staged output without CRT branching");
     s->completion.init(s->stream,bool(FHERMA_OUTPUT_GRAPH));
 #endif
-    if(s->overlap_input) {
+    if(s->overlap_input && !s->input_graph) {
         for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
             check(cudaStreamBeginCapture(s->stream,cudaStreamCaptureModeGlobal),"capture RNS input chunk");
             launch_input_chunk(*s,s->n*part/FHERMA_PIPELINE_INPUT,s->n/FHERMA_PIPELINE_INPUT,s->stream);
@@ -1157,6 +1175,21 @@ void* fherma_init(const fherma::Point& p) {
     check(cudaMemcpyAsync(s->input,s->host_input,2*bytes,cudaMemcpyHostToDevice,s->stream),"capture RNS H2D");
 #endif
     mark(*s,1,s->stream);
+#if defined(__CUDACC__) && FHERMA_INPUT_GRAPH
+    if(s->input_graph) {
+        check(cudaEventRecord(s->input_root,s->stream),"capture input graph root");
+        check(cudaStreamWaitEvent(s->transfer_stream,s->input_root,0),"capture input transfer branch");
+        for(unsigned part=0;part<FHERMA_PIPELINE_INPUT;++part) {
+            size_t begin=size_t(s->n)*AbiWords*part/FHERMA_PIPELINE_INPUT;
+            size_t count=size_t(s->n)*AbiWords/FHERMA_PIPELINE_INPUT;
+            s->input_completion.capture_wait(s->transfer_stream,part);
+            check(cudaMemcpyAsync(s->input+2*begin,s->host_input+2*begin,2*count*4,cudaMemcpyHostToDevice,s->transfer_stream),"capture ready input H2D");
+            check(cudaEventRecord(s->input_ready[part],s->transfer_stream),"capture input DMA ready");
+            check(cudaStreamWaitEvent(s->stream,s->input_ready[part],0),"capture input prepare dependency");
+            launch_input_chunk(*s,s->n*part/FHERMA_PIPELINE_INPUT,s->n/FHERMA_PIPELINE_INPUT,s->stream);
+        }
+    }
+#endif
     launch_rns(*s,s->stream);
 #if FHERMA_PIPELINE_OUTPUT<=1 && !FHERMA_MAPPED_OUTPUT
     check(cudaMemcpyAsync(s->host_output,s->input,bytes,cudaMemcpyDeviceToHost,s->stream),"capture RNS D2H");
@@ -1211,10 +1244,22 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #if FHERMA_PROFILE || FHERMA_HOST_PROFILE
     auto pack_start=std::chrono::steady_clock::now();
 #endif
+#if defined(__CUDACC__) && FHERMA_INPUT_GRAPH && FHERMA_GRAPH
+    if(s.input_graph) {
+        s.input_completion.reset();
+#if FHERMA_OUTPUT_SIGNAL
+        s.completion.begin();
+#endif
+        check(cudaGraphLaunch(s.graph,s.stream),"execute complete input/output graph");
+    }
+#endif
 #if FHERMA_GRAPH && FHERMA_PIPELINE_INPUT>1
     unsigned input_part=0;
     copy_input_pipeline<FHERMA_PIPELINE_INPUT>(s.copy,s.host_input,input.a.data.data(),input.b.data.data(),words,
         [&](size_t begin,const uint32_t* a,const uint32_t* b,size_t count) {
+#if defined(__CUDACC__) && FHERMA_INPUT_GRAPH
+            if(s.input_graph) {s.input_completion.publish(input_part++);return;}
+#endif
             if(FHERMA_MAPPED_INPUT && s.overlap_input) {
                 check(cudaGraphLaunch(s.prepare_graph[input_part],s.stream),"execute mapped input chunk");
                 ++input_part;
@@ -1248,10 +1293,12 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
 #endif
     if(FHERMA_OUTPUT_SPARE) output.c.data.swap(s.spare_output);
 #if FHERMA_GRAPH
+    if(!s.input_graph) {
 #if defined(__CUDACC__) && FHERMA_OUTPUT_SIGNAL
         s.completion.begin();
 #endif
         check(cudaGraphLaunch(s.graph,s.stream),"execute RNS graph");
+    }
 #if FHERMA_PIPELINE_OUTPUT>1 && !FHERMA_OUTPUT_GRAPH
         for(unsigned part=0;part<FHERMA_PIPELINE_OUTPUT;++part) {
             size_t begin=words*part/FHERMA_PIPELINE_OUTPUT,end=words*(part+1)/FHERMA_PIPELINE_OUTPUT;
@@ -1365,6 +1412,11 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& input) {
     return output;
     } catch(...) {
 #if FHERMA_GRAPH
+#if defined(__CUDACC__) && FHERMA_INPUT_GRAPH
+        // Never leave a graph waiting on host work that has thrown. It may
+        // finish on partial owned staging, but no result escapes this error.
+        if(s.input_graph) s.input_completion.release_all();
+#endif
         cudaStreamSynchronize(s.stream);
         if(s.transfer_stream) cudaStreamSynchronize(s.transfer_stream);
 #else
