@@ -8398,5 +8398,99 @@
     "host_graph_us": [],
     "host_alloc_us": [],
     "host_staged_us": []
+  },
+  {
+    "id": "6aac3a21b615118421bfb00f",
+    "status": "finished",
+    "cases": 3,
+    "passed": 3,
+    "failure": null,
+    "init_s": 0.293322596,
+    "started_at": "2026-09-17T19:06:10.938Z",
+    "finished_at": "2026-09-17T19:07:47.771Z",
+    "commit": "c0c961af92303fe56b7a60c5342930fdc0a95956",
+    "image": "fherma/cupqc@sha256:17b7ae721d6effe968f4c2ccf3876cde7a3a77df1eb3f28a1f41ea643a6fa802",
+    "runner": "fherma-gpu-rtx6000",
+    "points": [
+      {
+        "point": "N32768-W868",
+        "passed": 3,
+        "seeds": 3,
+        "seconds": {
+          "min": 0.000435635,
+          "median": 0.000435798,
+          "mean": 0.00043608300000000003,
+          "max": 0.000436816
+        }
+      }
+    ],
+    "case_errors": [],
+    "profiles_us": [],
+    "host_us": [],
+    "host_graph_us": [],
+    "host_alloc_us": [
+      {
+        "reserve": 0.7,
+        "prefault": 3.33,
+        "zero": 141.795
+      },
+      {
+        "reserve": 0.742,
+        "prefault": 2.419,
+        "zero": 128.243
+      },
+      {
+        "reserve": 0.584,
+        "prefault": 2.585,
+        "zero": 128.495
+      },
+      {
+        "reserve": 0.623,
+        "prefault": 2.752,
+        "zero": 126.909
+      },
+      {
+        "reserve": 0.634,
+        "prefault": 2.566,
+        "zero": 128.257
+      }
+    ],
+    "host_staged_us": [
+      {
+        "pack": 138.401,
+        "submit": 62.376,
+        "alloc": 145.825,
+        "wait": 0.594,
+        "unpack": 98.858
+      },
+      {
+        "pack": 114.716,
+        "submit": 58.675,
+        "alloc": 131.404,
+        "wait": 0.437,
+        "unpack": 89.306
+      },
+      {
+        "pack": 112.647,
+        "submit": 60.642,
+        "alloc": 131.664,
+        "wait": 0.364,
+        "unpack": 85.654
+      },
+      {
+        "pack": 112.894,
+        "submit": 57.965,
+        "alloc": 130.284,
+        "wait": 0.355,
+        "unpack": 90.118
+      },
+      {
+        "pack": 110.712,
+        "submit": 57.768,
+        "alloc": 131.457,
+        "wait": 0.462,
+        "unpack": 92.698
+      }
+    ]
   }
 ]
