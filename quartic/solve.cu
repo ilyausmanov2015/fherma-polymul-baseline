@@ -47,7 +47,7 @@
 #define FHERMA_HARVEY_BITS 3
 #endif
 #ifndef FHERMA_HARVEY
-#define FHERMA_HARVEY 0
+#define FHERMA_HARVEY 1
 #endif
 #ifndef FHERMA_OUTPUT_GRAPH
 #define FHERMA_OUTPUT_GRAPH 1
