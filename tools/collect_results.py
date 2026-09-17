@@ -23,6 +23,8 @@ for path in (ROOT/'local').glob('run-*.json'):
         for line in str(run.get('build_log','')).splitlines() if 'HOST_GRAPH_US' in line]
     row['host_alloc_us']=[{k:float(v) for k,v in re.findall(r'(\w+)=([0-9.]+)',line)}
         for line in str(run.get('build_log','')).splitlines() if 'HOST_ALLOC_US' in line]
+    row['host_staged_us']=[{k:float(v) for k,v in re.findall(r'(\w+)=([0-9.]+)',line)}
+        for line in str(run.get('build_log','')).splitlines() if 'HOST_STAGED_US' in line]
     rows.append(row)
 rows.sort(key=lambda r:r.get('started_at') or '')
 (ROOT/'results'/'experiments.json').write_text(json.dumps(rows,indent=2)+'\n')

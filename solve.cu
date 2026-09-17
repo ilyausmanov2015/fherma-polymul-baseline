@@ -26,7 +26,7 @@
 #define FHERMA_SPIN_COPY 1
 #endif
 #ifndef FHERMA_DIRECT_OUTPUT
-#define FHERMA_DIRECT_OUTPUT 1
+#define FHERMA_DIRECT_OUTPUT 0
 #endif
 #ifndef FHERMA_GRAPH
 #define FHERMA_GRAPH 1
@@ -66,7 +66,7 @@
 #define FHERMA_COPY_THREADS 8
 #endif
 #ifndef FHERMA_PARALLEL_OUTPUT
-#define FHERMA_PARALLEL_OUTPUT 0
+#define FHERMA_PARALLEL_OUTPUT 1
 #endif
 #ifndef FHERMA_CONSTANT_MODULUS
 #define FHERMA_CONSTANT_MODULUS 1
@@ -612,8 +612,32 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #endif
 #else
     check(cudaGraphLaunch(s.graph,s.stream),"execute graph");
+#if FHERMA_HOST_PROFILE
+    enqueued=HostClock::now();
+#endif
+#if FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT
+    out.c.data.reserve(words);
+    if(FHERMA_PREFAULT_OUTPUT) s.copy.prefault(out.c.data.data(),bytes);
+    out.c.data.resize(words);
+#endif
+#if FHERMA_HOST_PROFILE
+    prepared=HostClock::now();
+#endif
     check(cudaStreamSynchronize(s.stream),"graph result ready");
+#if FHERMA_HOST_PROFILE
+    synced=HostClock::now();
+#endif
+#if FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT
+    s.copy.output(out.c.data.data(),s.host_output,bytes);
+#else
     out.c.data.assign(s.host_output,s.host_output+words);
+#endif
+#if FHERMA_HOST_PROFILE
+    released=HostClock::now();
+    auto us=[](auto start,auto end) { return std::chrono::duration<double,std::micro>(end-start).count(); };
+    std::fprintf(stderr,"HOST_STAGED_US pack=%.3f enqueue=%.3f allocate=%.3f wait=%.3f copy=%.3f\n",
+                 us(pack_start,pack_end),us(pack_end,enqueued),us(enqueued,prepared),us(prepared,synced),us(synced,released));
+#endif
 #endif
     return out;
 #else
@@ -668,6 +692,8 @@ fherma::Outputs fherma_run(void* opaque,const fherma::Inputs& in) {
 #elif FHERMA_PINNED
 #if FHERMA_PARALLEL_COPY && FHERMA_PARALLEL_OUTPUT
     // Allocate while the GPU executes the already-enqueued NTT kernels.
+    out.c.data.reserve(words);
+    if(FHERMA_PREFAULT_OUTPUT) s.copy.prefault(out.c.data.data(),bytes);
     out.c.data.resize(words);
 #endif
     check(cudaMemcpy(s.host_output,s.input,bytes,cudaMemcpyDeviceToHost),"pinned output D2H");
