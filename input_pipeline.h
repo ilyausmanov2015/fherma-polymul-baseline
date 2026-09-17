@@ -4,13 +4,18 @@
 #ifndef FHERMA_ASYNC_INPUT
 #define FHERMA_ASYNC_INPUT 0
 #endif
+#ifndef FHERMA_INPUT_WORKER_PIPELINE
+#define FHERMA_INPUT_WORKER_PIPELINE 0
+#endif
 // Each input segment has its own pinned storage until the caller synchronizes
 // all enqueued transfers. No segment is overwritten by a subsequent segment.
 template<unsigned Parts,class Enqueue>
 void copy_input_pipeline(HostCopyPool& pool,uint32_t* pinned,const uint32_t* a,const uint32_t* b,
                          size_t words,Enqueue&& enqueue) {
     static_assert(Parts>0,"at least one input segment");
-#if FHERMA_ASYNC_INPUT
+#if FHERMA_INPUT_WORKER_PIPELINE
+    pool.input_pipeline<Parts>(pinned,a,b,words,enqueue);
+#elif FHERMA_ASYNC_INPUT
     struct Segment {size_t begin,count;};
     std::array<Segment,Parts> segments{};unsigned used=0;
     for(unsigned part=0;part<Parts;++part) {

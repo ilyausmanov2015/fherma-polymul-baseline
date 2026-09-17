@@ -64,6 +64,8 @@ class HostCopyPool {
     static_assert(Threads>=2 && Threads%2==0,"even copy thread count required");
     static_assert(OutputThreads>=1 && OutputThreads<=Threads,"output workers must fit the pool");
     struct Pipeline {
+        struct alignas(64) Progress {std::atomic<unsigned> chunks{0};};
+        std::array<Progress,Workers> copied;
         std::atomic<unsigned> ready{0};
         std::atomic<bool> cancelled{false};
         unsigned parts=0;
@@ -144,10 +146,19 @@ class HostCopyPool {
         size_t words=job.bytes/4;
         size_t begin=4*(words*chunk/job.pipeline->parts);
         size_t end=4*(words*(chunk+1)/job.pipeline->parts);
+        if(job.b) return {job.a+begin,job.b+begin,job.out+2*begin,end-begin};
         return {job.a+begin,nullptr,job.out+begin,end-begin};
     }
     static void part(const Job& job,unsigned rank) {
         if(!job.pipeline) {part_plain(job,rank);return;}
+        if(job.b) {
+            for(unsigned chunk=0;chunk<job.pipeline->parts;++chunk) {
+                if(job.pipeline->cancelled.load(std::memory_order_acquire)) return;
+                part_plain(pipeline_chunk(job,chunk),rank);
+                job.pipeline->copied[rank].chunks.store(chunk+1,std::memory_order_release);
+            }
+            return;
+        }
         if(!output_worker(rank) && rank!=Threads-1) return;
         for(unsigned chunk=0;chunk<job.pipeline->parts;++chunk) {
             while(job.pipeline->ready.load(std::memory_order_acquire)<=chunk) {
@@ -304,6 +315,30 @@ public:
         begin({static_cast<const char*>(a),static_cast<const char*>(b),static_cast<char*>(out),bytes},bool(FHERMA_DEFER_INPUT_CALLER));
     }
     void finish_inputs() { finish(); }
+    template<unsigned Parts,class Enqueue> void input_pipeline(void* out,const void* a,const void* b,size_t words,Enqueue enqueue) {
+        static_assert(Parts>0,"nonempty input pipeline");
+        if(!words) return;
+        Pipeline pipeline;pipeline.parts=Parts;
+        Job job{static_cast<const char*>(a),static_cast<const char*>(b),static_cast<char*>(out),words*4,false,&pipeline};
+        begin(job,true);deferred_caller_=false;
+        try {
+            for(unsigned chunk=0;chunk<Parts;++chunk) {
+                auto segment=pipeline_chunk(job,chunk);
+                if(!FHERMA_INPUT_WORKERS_ONLY) part_plain(segment,Threads-1);
+                for(unsigned rank=0;rank<Workers;++rank)
+                    while(pipeline.copied[rank].chunks.load(std::memory_order_acquire)<=chunk) pause();
+                size_t begin=words*chunk/Parts,count=segment.bytes/4;
+                if(count) {
+                    const auto* staged=reinterpret_cast<const uint32_t*>(segment.out);
+                    enqueue(begin,staged,staged+count,count);
+                }
+            }
+        } catch(...) {
+            pipeline.cancelled.store(true,std::memory_order_release);
+            finish();throw;
+        }
+        finish();
+    }
     void prefault(void* storage,size_t bytes) {
         run({nullptr,nullptr,static_cast<char*>(storage),bytes,true});
     }
